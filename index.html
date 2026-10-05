@@ -376,6 +376,28 @@
 
         // AUTHENTICATION
         let userUnsub = null;
+        let registering = false;
+
+        function showProfileSetup() {
+            document.getElementById('user-info').innerHTML =
+                `Finish your profile: <input id="setup-gt" placeholder="Xbox/PSN Gamertag (Exact)" style="width:220px; display:inline-block; margin:0 6px;">
+                 <button class="btn" onclick="saveProfile()">Save</button>`;
+        }
+
+        async function saveProfile() {
+            if (!currentUser) return;
+            const gt = document.getElementById('setup-gt').value.trim();
+            if (!gt) return alert("Gamertag required");
+            try {
+                const taken = await db.collection('users').where('gamertag', '==', gt).get();
+                if (!taken.empty && taken.docs[0].id !== currentUser.uid) return alert("That gamertag is already taken.");
+                await db.collection('users').doc(currentUser.uid).set(
+                    { gamertag: gt, elo: ELO_START, wins: 0, losses: 0, streak: 0 }, { merge: true });
+            } catch (e) {
+                console.error(e);
+                alert("Couldn't save your profile: " + (e.code || e.message));
+            }
+        }
         auth.onAuthStateChanged(user => {
             if (userUnsub) { userUnsub(); userUnsub = null; }
             if (user) {
@@ -384,13 +406,22 @@
                 // (Registration signs the user in BEFORE their profile doc exists, so a one-time
                 // get() could miss it. A snapshot listener picks it up as soon as it's written.)
                 document.getElementById('user-info').innerHTML = `Logged in as: <strong style="color:var(--accent)">${user.email}</strong>`;
-                document.getElementById('auth-btn').style.display = 'none'; // no log out button
+                document.getElementById('auth-btn').style.display = '';
+                document.getElementById('auth-btn').innerText = "Log Out";
+                document.getElementById('auth-btn').onclick = () => auth.signOut();
                 userUnsub = db.collection('users').doc(user.uid).onSnapshot(doc => {
-                    if (doc.exists) {
+                    if (doc.exists && doc.data().gamertag) {
                         currentGamertag = doc.data().gamertag;
                         document.getElementById('user-info').innerHTML = `Logged in as: <strong style="color:var(--accent)">${currentGamertag}</strong>`;
+                    } else if (!registering) {
+                        // Account exists but has no profile (e.g. the profile save failed at sign-up). Let them finish it.
+                        showProfileSetup();
                     }
-                }, err => console.error("Profile load error:", err));
+                }, err => {
+                    console.error("Profile load error:", err);
+                    document.getElementById('user-info').innerHTML =
+                        `<span style="color:#ff1744">Couldn't load your profile (${err.code || err.message}). Check your Firestore rules allow signed-in users to read/write their own users/{uid} document.</span>`;
+                });
             } else {
                 currentUser = null;
                 currentGamertag = "";
@@ -401,24 +432,31 @@
             }
         });
 
-        function register() {
+        async function register() {
             const email = document.getElementById('reg-email').value.trim();
             const pass = document.getElementById('reg-pass').value;
             const gt = document.getElementById('reg-gt').value.trim();
             if(!gt) return alert("Gamertag required");
 
-            auth.createUserWithEmailAndPassword(email, pass).then(cred => {
-                db.collection('users').doc(cred.user.uid).set({
+            registering = true; // stops the profile-setup prompt from flashing while we save
+            try {
+                const cred = await auth.createUserWithEmailAndPassword(email, pass);
+                await db.collection('users').doc(cred.user.uid).set({
                     gamertag: gt,
                     elo: ELO_START,
                     wins: 0,
                     losses: 0,
-                    streak: 0 
-                }).then(() => {
-                    alert("Account Created! Welcome to 1v1LB.");
-                    showTab('leaderboard');
+                    streak: 0
                 });
-            }).catch(err => alert(err.message));
+                alert("Account Created! Welcome to 1v1LB.");
+                showTab('leaderboard');
+            } catch (err) {
+                alert(err.message);
+            } finally {
+                registering = false;
+                // If the profile save failed, let the signed-in user finish it
+                if (currentUser && !currentGamertag) showProfileSetup();
+            }
         }
 
         function login() {

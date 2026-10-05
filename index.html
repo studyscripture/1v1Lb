@@ -43,6 +43,12 @@
         /* Problems box (shown only when something is wrong) */
         #diag { display: none; background: #2a0d0d; border-left: 4px solid #ff1744; padding: 10px 20px; margin-bottom: 20px; color: #ff8a80; line-height: 1.5; }
         #diag div + div { margin-top: 8px; }
+        /* Notifications (match accepted etc.) */
+        #notice .note { background: #0d2a14; border-left: 4px solid #00e676; padding: 10px 20px; margin-bottom: 12px; color: #b9f6ca; display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; line-height: 1.5; }
+        .my-matches { background: #232323; border-left: 3px solid #00e676; padding: 12px 20px; margin-bottom: 20px; }
+        .my-matches h3 { margin: 0 0 8px; border: none; padding: 0; color: #00e676; }
+        .my-matches .row { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 0; border-top: 1px dashed var(--border); }
+        .btn-small { padding: 5px 9px; }
         .footer-link { text-align: center; margin: 10px 0 30px; font-size: 12px; }
         .footer-link a { color: #888; cursor: pointer; text-decoration: underline; }
 
@@ -104,6 +110,9 @@
 
         <!-- Shows database/login problems instead of failing silently -->
         <div id="diag"></div>
+
+        <!-- Match accepted notifications -->
+        <div id="notice"></div>
 
         <!-- AUTH TAB -->
         <div id="auth" class="tab">
@@ -183,6 +192,9 @@
                 <button class="btn" style="width: 100%; margin-top: 15px;" onclick="postMatch()">Post Match to Board</button>
             </div>
 
+            <div id="my-matches"></div>
+
+            <h3 style="margin-top:0;">Open Matches</h3>
             <div style="overflow-x: auto;">
                 <table>
                     <thead><tr>
@@ -758,8 +770,10 @@
                 const ms = d => (d.createdAt && d.createdAt.toMillis) ? d.createdAt.toMillis() : Date.now(); // pending writes have no timestamp yet
                 matchesCache.sort((a, b) => ms(b) - ms(a));
 
+                // The public board only shows matches nobody has accepted yet
+                const open = matchesCache.filter(m => !m.acceptedByUid);
                 let html = "";
-                matchesCache.forEach(m => {
+                open.forEach(m => {
                     const mine = currentUser && m.hostUid === currentUser.uid;
                     html += `<tr>
                         <td style="color:var(--accent); font-weight:bold;">${esc(m.host)}</td>
@@ -768,15 +782,65 @@
                         <td style="max-width:200px; line-height:1.4;">${esc(m.maps)}</td>
                         <td>${esc(m.rules)}</td>
                         <td>${mine
-                            ? `<button class="btn btn-red" onclick="removeMatch('${esc(m.id)}')">Remove</button>`
+                            ? `<button class="btn btn-red" onclick="removeMatch('${esc(m.id)}')">Delete</button>`
                             : `<button class="btn" onclick="acceptMatch('${esc(m.id)}')">Accept</button>`}</td>
                     </tr>`;
                 });
                 $('mf-body').innerHTML = html || '<tr><td colspan="6">No open matches right now.</td></tr>';
+                renderMyMatches();
+                renderNotices();
             }, err => {
                 console.error("Match finder error:", err);
                 $('mf-body').innerHTML = `<tr><td colspan="6" style="color:#ff1744">Couldn't load matches. ${esc(describe(err))}</td></tr>`;
             });
+        }
+
+        // Your own matches: waiting ones (can delete) and accepted ones (shows who you're playing)
+        function renderMyMatches() {
+            const box = $('my-matches');
+            if (!currentUser) { box.innerHTML = ''; return; }
+            const recent = m => { const t = m.acceptedAt; return !t || !t.toMillis || (Date.now() - t.toMillis()) < 48 * 3600000; };
+            const mine = matchesCache.filter(m =>
+                (m.hostUid === currentUser.uid && (!m.acceptedByUid || recent(m))) ||
+                (m.acceptedByUid === currentUser.uid && recent(m)));
+            if (!mine.length) { box.innerHTML = ''; return; }
+            let html = '<div class="my-matches"><h3>Your Matches</h3>';
+            mine.forEach(m => {
+                const detail = `${esc(m.series)} on ${esc(m.console)} (${esc(m.maps)})`;
+                if (!m.acceptedByUid) {
+                    html += `<div class="row"><span>Waiting for an opponent: ${detail}</span>
+                        <button class="btn btn-red btn-small" onclick="removeMatch('${esc(m.id)}')">Delete</button></div>`;
+                } else {
+                    const iHost = m.hostUid === currentUser.uid;
+                    const opp = iHost ? m.acceptedBy : m.host;
+                    html += `<div class="row"><span><b style="color:#00e676">Accepted:</b> you vs <b style="color:var(--accent)">${esc(opp)}</b>, ${detail}. Message them on ${esc(m.console)} to start.</span>
+                        <button class="btn btn-small" onclick="goReport('${esc(opp).replace(/'/g, '')}')">Report score</button></div>`;
+                }
+            });
+            box.innerHTML = html + '</div>';
+        }
+
+        // Banner on every tab when someone accepts a match you posted
+        function renderNotices() {
+            const box = $('notice');
+            if (!currentUser) { box.innerHTML = ''; return; }
+            const fresh = matchesCache.filter(m => m.hostUid === currentUser.uid && m.acceptedByUid && m.hostSeen === false);
+            box.innerHTML = fresh.map(m => `<div class="note">
+                <span><b>${esc(m.acceptedBy)}</b> accepted your ${esc(m.series)} match on ${esc(m.console)} (${esc(m.maps)}). Message them on ${esc(m.console)} to start!</span>
+                <button class="btn btn-small" onclick="dismissNotice('${esc(m.id)}')">Got it</button>
+            </div>`).join('');
+            const base = document.title.replace(/^\(\d+\) /, '');
+            document.title = fresh.length ? `(${fresh.length}) ${base}` : base;
+        }
+
+        async function dismissNotice(matchId) {
+            try { await withTimeout(db.collection('matches').doc(matchId).update({ hostSeen: true })); }
+            catch (e) { console.error(e); alert("Couldn't dismiss that. " + describe(e)); }
+        }
+
+        function goReport(oppName) {
+            $('rep-opp').value = oppName;
+            showTab('report');
         }
 
         // ==========================================
@@ -796,26 +860,48 @@
                     maps: maps.join(' / '),
                     createdAt: TS()
                 }));
-                alert("Match posted to the board!");
+                alert("Match posted to the board! You'll get a notice here when someone accepts it. You can delete it until then.");
             } catch (e) {
                 console.error(e);
                 alert("Your match was NOT saved. " + describe(e));
             }
         }
 
-        function acceptMatch(matchId) {
+        // Accepting is a transaction so two people can't both accept the same match
+        async function acceptMatch(matchId) {
             if (!requireReady('accept a match')) return;
-            const m = matchesCache.find(x => x.id === matchId);
-            if (!m) return alert("This match is no longer available.");
-            if (m.hostUid === currentUser.uid || m.host === gt()) return alert("You can't accept your own match.");
-            alert('Match accepted! Message ' + m.host + ' on ' + m.console + ' to start!');
+            const ref = db.collection('matches').doc(matchId);
+            try {
+                let info = null;
+                await withTimeout(db.runTransaction(async tx => {
+                    const snap = await tx.get(ref);
+                    if (!snap.exists) throw new Error("This match is no longer available.");
+                    const d = snap.data();
+                    if (d.acceptedByUid) throw new Error("Someone else already accepted this match.");
+                    if (d.hostUid === currentUser.uid || d.host === gt()) throw new Error("You can't accept your own match.");
+                    tx.update(ref, { acceptedBy: gt(), acceptedByUid: currentUser.uid, acceptedAt: TS(), hostSeen: false });
+                    info = d;
+                }), 15000);
+                alert(`Match accepted! ${info.host} has been notified. Message them on ${info.console} to start!`);
+            } catch (e) {
+                console.error(e);
+                alert("Couldn't accept this match. " + describe(e));
+            }
         }
 
+        // The host can delete a match until someone accepts it
         async function removeMatch(matchId) {
             if (!currentUser) return;
-            if (!confirm("Remove your match from the board?")) return;
+            const m = matchesCache.find(x => x.id === matchId);
+            if (m && m.acceptedByUid) return alert("Someone already accepted this match, so it can't be deleted.");
+            if (!confirm("Delete your match from the board?")) return;
             try { await withTimeout(db.collection('matches').doc(matchId).delete()); }
-            catch (e) { console.error(e); alert("Couldn't remove the match. " + describe(e)); }
+            catch (e) {
+                console.error(e);
+                alert(e && e.code === 'permission-denied'
+                    ? "Couldn't delete it. Someone may have just accepted it, or the Firestore rules need updating (see firestore.rules)."
+                    : "Couldn't delete the match. " + describe(e));
+            }
         }
 
         // ==========================================

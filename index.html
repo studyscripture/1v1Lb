@@ -316,8 +316,6 @@
         // Keep users signed in across page loads and browser restarts
         auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).catch(console.error);
         const db = firebase.firestore();
-        // Local cache so the profile and leaderboard appear instantly on refresh
-        db.enablePersistence({ synchronizeTabs: true }).catch(e => console.warn("Offline cache unavailable:", e.code));
 
         let currentUser = null;
         let currentGamertag = "";
@@ -414,29 +412,30 @@
                     ? `Logged in as: <strong style="color:var(--accent)">${cachedGt}</strong>`
                     : `Logged in. Loading your profile...`;
                 document.getElementById('auth-btn').style.display = 'none'; // no log out button
-                userUnsub = db.collection('users').doc(user.uid).onSnapshot(async doc => {
-                    if (doc.exists && doc.data().gamertag) {
-                        currentGamertag = doc.data().gamertag;
-                        try { localStorage.setItem('gt_' + user.uid, currentGamertag); } catch (e) {}
-                        renderMatches();
-                        document.getElementById('user-info').innerHTML = `Logged in as: <strong style="color:var(--accent)">${currentGamertag}</strong>`;
-                        return;
-                    }
-                    if (registering) return;
-                    // Don't trust a "missing" answer that only came from the local cache; confirm with the server first
-                    try {
-                        const fresh = await db.collection('users').doc(user.uid).get({ source: 'server' });
-                        if (fresh.exists && fresh.data().gamertag) return; // the listener will fire again with the real data
-                    } catch (e) {
-                        console.warn("Server profile check failed:", e);
-                        return; // offline or blocked: keep showing whatever we have, don't nag for a gamertag
-                    }
-                    showProfileSetup();
-                }, err => {
+                const applyProfile = (data) => {
+                    currentGamertag = data.gamertag;
+                    try { localStorage.setItem('gt_' + user.uid, currentGamertag); } catch (e) {}
+                    renderMatches();
+                    document.getElementById('user-info').innerHTML = `Logged in as: <strong style="color:var(--accent)">${currentGamertag}</strong>`;
+                };
+                const showProfileError = (err) => {
                     console.error("Profile load error:", err);
                     document.getElementById('user-info').innerHTML =
                         `<span style="color:#ff1744">Couldn't load your profile (${err.code || err.message}). Check your Firestore rules allow signed-in users to read/write their own users/{uid} document.</span>`;
-                });
+                };
+
+                userUnsub = db.collection('users').doc(user.uid).onSnapshot(async doc => {
+                    if (doc.exists && doc.data().gamertag) return applyProfile(doc.data());
+                    if (registering) return;
+                    // Confirm with the server before asking for a gamertag
+                    try {
+                        const fresh = await db.collection('users').doc(user.uid).get({ source: 'server' });
+                        if (fresh.exists && fresh.data().gamertag) return applyProfile(fresh.data());
+                        showProfileSetup();
+                    } catch (e) {
+                        showProfileError(e);
+                    }
+                }, showProfileError);
             } else {
                 currentUser = null;
                 currentGamertag = "";

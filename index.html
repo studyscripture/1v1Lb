@@ -316,9 +316,6 @@
         // Keep users signed in across page loads and browser restarts
         auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).catch(console.error);
         const db = firebase.firestore();
-        // Long polling is slower to start but works on networks, VPNs and browser extensions that break
-        // Firestore's default streaming connection (the usual cause of "unavailable" errors).
-        db.settings({ experimentalForceLongPolling: true, merge: true });
 
         let currentUser = null;
         let currentGamertag = "";
@@ -430,17 +427,11 @@
                         `<span style="color:#ff1744">Couldn't load your profile (${err.code || err.message}). ${hint}</span>`;
                 };
 
-                userUnsub = db.collection('users').doc(user.uid).onSnapshot(async doc => {
+                userUnsub = db.collection('users').doc(user.uid).onSnapshot(doc => {
                     if (doc.exists && doc.data().gamertag) return applyProfile(doc.data());
                     if (registering) return;
-                    // Confirm with the server before asking for a gamertag
-                    try {
-                        const fresh = await db.collection('users').doc(user.uid).get({ source: 'server' });
-                        if (fresh.exists && fresh.data().gamertag) return applyProfile(fresh.data());
-                        showProfileSetup();
-                    } catch (e) {
-                        showProfileError(e);
-                    }
+                    // Only ask for a gamertag once the SERVER has confirmed there's no profile
+                    if (!doc.metadata.fromCache) showProfileSetup();
                 }, showProfileError);
             } else {
                 currentUser = null;

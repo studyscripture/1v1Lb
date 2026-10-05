@@ -108,7 +108,7 @@
                 </div>
                 <div class="box-half">
                     <h3>Register</h3>
-                    <input type="text" id="reg-gt" placeholder="Xbox/PSN Gamertag (Exact)">
+                    <input type="text" id="reg-gt" placeholder="PSN ID (optional, can add later)" maxlength="24">
                     <input type="email" id="reg-email" placeholder="Email">
                     <input type="password" id="reg-pass" placeholder="Password">
                     <button class="btn" onclick="register()" style="margin-top:10px;">Create Account</button>
@@ -291,7 +291,7 @@
                 <li>Scores must be reported within 24 hours. If one player fails to report or dispute, the reporting player automatically receives the win.</li>
                 <li>Reporting fake wins/losses without a match occurring results in suspension.</li>
                 <li>If a player fails to arrive, the other player must provide valid proof of absence to claim a forfeit win.</li>
-                <li>Players MUST use the exact in-game usernames displayed on their 1v1LB Profile.</li>
+                <li>Players MUST use the exact PSN ID displayed on their 1v1LB Profile.</li>
                 <li>One account per player. Alt accounts, or playing yourself to gain points, result in a ban. Repeat matches between the same two players earn reduced Elo, and are unrated after the fourth in a week.</li>
             </ul>
 
@@ -484,24 +484,50 @@
 
         function setUserInfo(html) { document.getElementById('user-info').innerHTML = html; }
 
-        function showProfileSetup() {
-            if (document.getElementById('setup-gt')) return; // don't wipe what they're typing
-            setUserInfo(
-                `Finish your profile: <input id="setup-gt" placeholder="Xbox/PSN Gamertag (Exact)" style="width:220px; display:inline-block; margin:0 6px;">
-                 <button class="btn" onclick="saveProfile()">Save</button>`);
+        function showLoggedIn() {
+            setUserInfo(`Logged in as: <strong style="color:var(--accent)">${esc(currentGamertag)}</strong>
+                <button class="btn" style="margin-left:10px; padding:4px 8px;" onclick="changePsn()">Change PSN</button>`);
         }
 
-        async function saveProfile() {
-            if (!currentUser) return;
-            const gt = document.getElementById('setup-gt').value.trim();
-            if (!gt) return alert("Gamertag required");
-            if (gt.length > 24) return alert("Gamertag is too long (24 characters max).");
+        // The PSN is saved on the login (displayName). If the database record is missing, rebuild it from that.
+        let restoring = false;
+        async function restoreProfileFromAuth(user) {
+            if (restoring) return;
+            restoring = true;
             try {
-                if (await gamertagTaken(gt, currentUser.uid)) return alert("That gamertag is already taken.");
+                const gt = user.displayName;
+                if (await gamertagTaken(gt, user.uid)) { showProfileSetup(); return; }
+                const ref = db.collection('users').doc(user.uid);
+                const snap = await ref.get();
+                const existing = snap.exists ? snap.data() : {};
+                const data = { gamertag: gt, gamertagLower: gt.toLowerCase(), emailKey: emailKey(user.email) };
+                if (typeof existing.elo !== 'number') data.elo = ELO_START;
+                if (typeof existing.wins !== 'number') data.wins = 0;
+                if (typeof existing.losses !== 'number') data.losses = 0;
+                if (typeof existing.streak !== 'number') data.streak = 0;
+                if (!existing.createdAt) data.createdAt = firebase.firestore.FieldValue.serverTimestamp();
+                await ref.set(data, { merge: true }); // the profile listener fires again and shows the name
+            } catch (e) {
+                console.error("Couldn't restore profile:", e);
+                showProfileSetup();
+            } finally { restoring = false; }
+        }
+
+        // Set or change your PSN any time (no limits)
+        async function changePsn() {
+            if (!currentUser) return;
+            const had = !!currentGamertag;
+            const input = prompt(had ? `Enter your new PSN ID (currently "${currentGamertag}"):` : "Enter your PSN ID:");
+            if (input === null) return;
+            const gt = input.trim();
+            if (!gt || gt === currentGamertag) return;
+            if (gt.length > 24) return alert("PSN is too long (24 characters max).");
+            try {
+                if (await gamertagTaken(gt, currentUser.uid)) return alert("That PSN is already taken.");
                 const ref = db.collection('users').doc(currentUser.uid);
                 const snap = await ref.get();
                 const existing = snap.exists ? snap.data() : {};
-                // Only fill in what's missing, so an existing account never has its stats reset
+                // Only fill in what's missing, so stats are never reset
                 const data = { gamertag: gt, gamertagLower: gt.toLowerCase(), emailKey: emailKey(currentUser.email) };
                 if (typeof existing.elo !== 'number') data.elo = ELO_START;
                 if (typeof existing.wins !== 'number') data.wins = 0;
@@ -509,28 +535,38 @@
                 if (typeof existing.streak !== 'number') data.streak = 0;
                 if (!existing.createdAt) data.createdAt = firebase.firestore.FieldValue.serverTimestamp();
                 await ref.set(data, { merge: true });
+                try { await currentUser.updateProfile({ displayName: gt }); } catch (e) { console.error(e); }
+                alert(had ? "PSN updated." : "PSN saved.");
             } catch (e) {
                 console.error(e);
-                alert("Couldn't save your profile: " + (e.code || e.message));
+                alert("Couldn't save your PSN: " + (e.code || e.message));
             }
+        }
+
+        // No PSN yet is fine. Just show a button instead of a blocking prompt.
+        function showProfileSetup() {
+            setUserInfo(`Logged in as: <strong style="color:var(--accent)">${esc(currentUser ? currentUser.email : '')}</strong>
+                <span style="color:#888">(no PSN set)</span>
+                <button id="set-psn-btn" class="btn" style="margin-left:10px; padding:4px 8px;" onclick="changePsn()">Set PSN</button>`);
         }
 
         auth.onAuthStateChanged(user => {
             if (userUnsub) { userUnsub(); userUnsub = null; }
             clearTimeout(profileTimer);
+            restartDataListeners();
 
             if (user) {
                 currentUser = user;
                 currentGamertag = "";
                 renderVerifyBar();
-                setUserInfo(`Loading profile for <strong style="color:var(--accent)">${esc(user.email)}</strong>…`);
+                setUserInfo(`Logged in as: <strong style="color:var(--accent)">${esc(user.displayName || user.email)}</strong> <span style="color:#888">(loading…)</span>`);
                 document.getElementById('auth-btn').style.display = '';
                 document.getElementById('auth-btn').innerText = "Log Out";
                 document.getElementById('auth-btn').onclick = () => auth.signOut();
 
                 // If the database never answers (ad blocker / privacy extension blocking Firestore), say so instead of guessing.
                 profileTimer = setTimeout(() => {
-                    if (!currentGamertag && !document.getElementById('setup-gt')) {
+                    if (!currentGamertag && !document.getElementById('set-psn-btn')) {
                         setUserInfo(`<span style="color:#ff1744">Can't reach the database. If you use an ad blocker or privacy extension, allow <b>firestore.googleapis.com</b> for this site, then refresh.</span>`);
                     }
                 }, 8000);
@@ -541,13 +577,19 @@
                     if (doc.exists && doc.data().gamertag) {
                         clearTimeout(profileTimer);
                         currentGamertag = doc.data().gamertag;
-                        setUserInfo(`Logged in as: <strong style="color:var(--accent)">${esc(currentGamertag)}</strong>`);
+                        showLoggedIn();
+                        // Keep the login's display name in step with the database
+                        if (user.displayName !== currentGamertag) user.updateProfile({ displayName: currentGamertag }).catch(() => {});
                     } else if (doc.metadata.fromCache) {
                         // Not confirmed by the server yet. Keep waiting rather than nagging.
                     } else if (!registering) {
                         clearTimeout(profileTimer);
-                        console.warn("No gamertag on users/" + user.uid + " (server confirmed). Showing profile setup.");
-                        showProfileSetup();
+                        if (user.displayName) {
+                            restoreProfileFromAuth(user); // PSN is already on the account: rebuild the record, don't ask again
+                        } else {
+                            console.warn("No gamertag on users/" + user.uid + " (server confirmed). Showing profile setup.");
+                            showProfileSetup();
+                        }
                     }
                 }, err => {
                     clearTimeout(profileTimer);
@@ -569,8 +611,7 @@
             const email = document.getElementById('reg-email').value.trim();
             const pass = document.getElementById('reg-pass').value;
             const gt = document.getElementById('reg-gt').value.trim();
-            if (!gt) return alert("Gamertag required");
-            if (gt.length > 24) return alert("Gamertag is too long (24 characters max).");
+            if (gt.length > 24) return alert("PSN is too long (24 characters max).");
 
             const domain = (email.split('@')[1] || '').toLowerCase();
             if (DISPOSABLE_DOMAINS.includes(domain)) return alert("Disposable email addresses aren't allowed. Please use a real email.");
@@ -579,6 +620,9 @@
             let ok = false;
             try {
                 const cred = await auth.createUserWithEmailAndPassword(email, pass);
+                // Store the PSN on the login itself too. It survives refreshes without needing the database,
+                // and lets the profile be rebuilt automatically if the database record is ever missing.
+                if (gt) { try { await cred.user.updateProfile({ displayName: gt }); } catch (e) { console.error(e); } }
 
                 // Duplicate checks (done signed-in so they work with typical Firestore rules)
                 const dupMail = await db.collection('users').where('emailKey', '==', emailKey(email)).get();
@@ -586,14 +630,13 @@
                     await cred.user.delete();
                     return alert("An account already exists for that email address.");
                 }
-                if (await gamertagTaken(gt, cred.user.uid)) {
+                if (gt && await gamertagTaken(gt, cred.user.uid)) {
                     await cred.user.delete();
-                    return alert("That gamertag is already taken.");
+                    return alert("That PSN is already taken.");
                 }
 
                 await db.collection('users').doc(cred.user.uid).set({
-                    gamertag: gt,
-                    gamertagLower: gt.toLowerCase(),
+                    ...(gt ? { gamertag: gt, gamertagLower: gt.toLowerCase() } : {}),
                     emailKey: emailKey(email),
                     elo: ELO_START,
                     wins: 0,
@@ -628,8 +671,19 @@
         // ==========================================
         // LEADERBOARD (LIVE LISTENER) - ranked by Elo, then wins
         // ==========================================
-        db.collection('users').onSnapshot(snapshot => {
-            playersCache = snapshot.docs.map(d => ({ uid: d.id, ...d.data() }));
+        // Listeners are started from onAuthStateChanged (after the saved login is restored) and restarted on every
+        // login/logout. Starting them at page load made them fail with permission-denied on refresh and never retry.
+        let lbUnsub = null, mfUnsub = null;
+        function restartDataListeners() {
+            if (lbUnsub) { lbUnsub(); lbUnsub = null; }
+            if (mfUnsub) { mfUnsub(); mfUnsub = null; }
+            lbUnsub = startLeaderboard();
+            mfUnsub = startMatchFinder();
+        }
+
+        function startLeaderboard() {
+        return db.collection('users').onSnapshot(snapshot => {
+            playersCache =snapshot.docs.map(d => ({ uid: d.id, ...d.data() }));
 
             const players = playersCache
                 .filter(p => p.gamertag)
@@ -660,11 +714,13 @@
             console.error("Leaderboard error:", err);
             document.getElementById('lb-body').innerHTML = `<tr><td colspan="7" style="color:#ff1744">Couldn't load rankings (${esc(err.code || err.message)}). If you use an ad blocker, allow firestore.googleapis.com for this site.</td></tr>`;
         });
+        }
 
         // ==========================================
         // MATCH FINDER (LIVE LISTENER)
         // ==========================================
-        db.collection('matches').orderBy('createdAt', 'desc').onSnapshot(snapshot => {
+        function startMatchFinder() {
+        return db.collection('matches').orderBy('createdAt', 'desc').onSnapshot(snapshot => {
             let html = "";
             snapshot.forEach(doc => {
                 const data = doc.data();
@@ -682,10 +738,11 @@
             console.error("Match finder error:", err);
             document.getElementById('mf-body').innerHTML = `<tr><td colspan="6" style="color:#ff1744">Couldn't load matches (${esc(err.code || err.message)}).</td></tr>`;
         });
+        }
 
         async function acceptMatch(matchId) {
             if (!requireVerified('accept a match')) return;
-            if (!currentGamertag) return alert("Your profile is still loading, try again in a second.");
+            if (!currentGamertag) return alert("Set your PSN first using the button in the top bar. (If you already did, your profile is still loading, try again in a second.)");
             try {
                 const doc = await db.collection('matches').doc(matchId).get();
                 if (!doc.exists) return alert("This match is no longer available.");
@@ -704,7 +761,7 @@
 
         async function postMatch() {
             if (!requireVerified('post a match')) return;
-            if (!currentGamertag) return alert("Your profile is still loading, try again in a second.");
+            if (!currentGamertag) return alert("Set your PSN first using the button in the top bar. (If you already did, your profile is still loading, try again in a second.)");
             const cons = document.getElementById('match-console').value;
             const rules = document.getElementById('match-rules').value;
             const series = document.getElementById('match-series').value;
@@ -735,7 +792,7 @@
         // ==========================================
         async function submitReport() {
             if (!requireVerified('report a score')) return;
-            if (!currentGamertag) return alert("Your profile is still loading, try again in a second.");
+            if (!currentGamertag) return alert("Set your PSN first using the button in the top bar. (If you already did, your profile is still loading, try again in a second.)");
 
             try {
                 // Resolve what they typed to the real gamertag (case-insensitive) so typos can't create reports that never match

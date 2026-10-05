@@ -77,10 +77,10 @@
     </header>
 
     <nav>
-        <button class="active" onclick="showTab('leaderboard')">Leaderboard</button>
-        <button onclick="showTab('matchfinder')">Match Finder</button>
-        <button onclick="showTab('report')">Report / Dispute</button>
-        <button onclick="showTab('rules')">Rules</button>
+        <button class="active" data-tab="leaderboard" onclick="showTab('leaderboard')">Leaderboard</button>
+        <button data-tab="matchfinder" onclick="showTab('matchfinder')">Match Finder</button>
+        <button data-tab="report" onclick="showTab('report')">Report / Dispute</button>
+        <button data-tab="rules" onclick="showTab('rules')">Rules</button>
     </nav>
 
     <div class="container">
@@ -117,13 +117,14 @@
                 <thead><tr>
                     <th>Rank</th>
                     <th>Gamertag</th>
+                    <th>Elo</th>
                     <th>Wins</th>
                     <th>Losses</th>
                     <th>W/L Ratio</th>
                     <th>Streak</th>
                 </tr></thead>
                 <tbody id="lb-body">
-                    <tr><td colspan="6">Loading rankings...</td></tr>
+                    <tr><td colspan="7">Loading rankings...</td></tr>
                 </tbody>
             </table>
         </div>
@@ -312,17 +313,25 @@
         
         if (!firebase.apps.length) { firebase.initializeApp(firebaseConfig); }
         const auth = firebase.auth();
+        // Keep users signed in across page loads and browser restarts
+        auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).catch(console.error);
         const db = firebase.firestore();
 
         let currentUser = null;
         let currentGamertag = "";
+
+        // ELO SETTINGS
+        const ELO_START = 1000; // starting rating for new players
+        const ELO_K = 32;       // max points swing per series; raise for faster movement
 
         // UI & TABS
         function showTab(tabId) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
             document.getElementById(tabId).classList.add('active');
-            event.currentTarget.classList.add('active');
+            // Highlight the matching nav button (no reliance on window.event, which is null in async callbacks)
+            const navBtn = document.querySelector(`nav button[data-tab="${tabId}"]`);
+            if (navBtn) navBtn.classList.add('active');
         }
 
         // TOGGLE REPORT UI
@@ -366,35 +375,42 @@
         }
 
         // AUTHENTICATION
+        let userUnsub = null;
         auth.onAuthStateChanged(user => {
+            if (userUnsub) { userUnsub(); userUnsub = null; }
             if (user) {
                 currentUser = user;
-                db.collection('users').doc(user.uid).get().then(doc => {
-                    if(doc.exists) {
+                // Always show logged-in state right away, then fill in the gamertag live.
+                // (Registration signs the user in BEFORE their profile doc exists, so a one-time
+                // get() could miss it. A snapshot listener picks it up as soon as it's written.)
+                document.getElementById('user-info').innerHTML = `Logged in as: <strong style="color:var(--accent)">${user.email}</strong>`;
+                document.getElementById('auth-btn').style.display = 'none'; // no log out button
+                userUnsub = db.collection('users').doc(user.uid).onSnapshot(doc => {
+                    if (doc.exists) {
                         currentGamertag = doc.data().gamertag;
                         document.getElementById('user-info').innerHTML = `Logged in as: <strong style="color:var(--accent)">${currentGamertag}</strong>`;
-                        document.getElementById('auth-btn').innerText = "Log Out";
-                        document.getElementById('auth-btn').onclick = () => auth.signOut();
                     }
-                });
+                }, err => console.error("Profile load error:", err));
             } else {
                 currentUser = null;
                 currentGamertag = "";
                 document.getElementById('user-info').innerText = "Not logged in. Log in to post matches and report scores.";
+                document.getElementById('auth-btn').style.display = '';
                 document.getElementById('auth-btn').innerText = "Login / Register";
                 document.getElementById('auth-btn').onclick = () => showTab('auth');
             }
         });
 
         function register() {
-            const email = document.getElementById('reg-email').value;
+            const email = document.getElementById('reg-email').value.trim();
             const pass = document.getElementById('reg-pass').value;
-            const gt = document.getElementById('reg-gt').value;
+            const gt = document.getElementById('reg-gt').value.trim();
             if(!gt) return alert("Gamertag required");
 
             auth.createUserWithEmailAndPassword(email, pass).then(cred => {
                 db.collection('users').doc(cred.user.uid).set({
                     gamertag: gt,
+                    elo: ELO_START,
                     wins: 0,
                     losses: 0,
                     streak: 0 
@@ -406,37 +422,41 @@
         }
 
         function login() {
-            const email = document.getElementById('login-email').value;
+            const email = document.getElementById('login-email').value.trim();
             const pass = document.getElementById('login-pass').value;
             auth.signInWithEmailAndPassword(email, pass).then(() => {
                 showTab('leaderboard');
             }).catch(err => alert(err.message));
         }
 
-        // LEADERBOARD (LIVE LISTENER)
-        db.collection('users').orderBy('wins', 'desc').limit(50).onSnapshot(snapshot => {
+        // LEADERBOARD (LIVE LISTENER) - ranked by Elo, then wins
+        // Sorted in the browser so older accounts without an elo field still show up (as 1000).
+        db.collection('users').onSnapshot(snapshot => {
             const lb = document.getElementById('lb-body');
+            const players = snapshot.docs.map(d => {
+                const x = d.data();
+                return { ...x, elo: typeof x.elo === 'number' ? x.elo : ELO_START, wins: x.wins || 0, losses: x.losses || 0 };
+            });
+            players.sort((a, b) => b.elo - a.elo || b.wins - a.wins);
+
             lb.innerHTML = "";
-            let rank = 1;
-            
-            snapshot.forEach(doc => {
-                const data = doc.data();
+            players.slice(0, 50).forEach((data, i) => {
                 let wlRatio = "0.00";
                 if (data.losses === 0 && data.wins > 0) wlRatio = data.wins.toFixed(2);
                 else if (data.wins > 0 || data.losses > 0) wlRatio = (data.wins / data.losses).toFixed(2);
 
-                let currentStreak = data.streak || 0;
-                let streakDisplay = currentStreak >= 3 ? `<span class="streak-fire">🔥 ${currentStreak}</span>` : currentStreak;
+                const currentStreak = data.streak || 0;
+                const streakDisplay = currentStreak >= 3 ? `<span class="streak-fire">🔥 ${currentStreak}</span>` : currentStreak;
 
                 lb.innerHTML += `<tr>
-                    <td>#${rank}</td>
+                    <td>#${i + 1}</td>
                     <td style="color:var(--accent); font-weight:bold;">${data.gamertag}</td>
+                    <td style="color:var(--text-light); font-weight:bold;">${data.elo}</td>
                     <td style="color:#00e676;">${data.wins}</td>
                     <td style="color:#ff1744;">${data.losses}</td>
                     <td>${wlRatio}</td>
                     <td>${streakDisplay}</td>
                 </tr>`;
-                rank++;
             });
         });
 
@@ -452,13 +472,73 @@
                     <td>${data.series}</td>
                     <td style="max-width: 200px; line-height: 1.4;">${data.maps}</td>
                     <td>${data.rules}</td>
-                    <td><button class="btn" onclick="alert('Message them on ${data.console} to start!')">Accept</button></td>
+                    <td><button class="btn" onclick="acceptMatch('${doc.id}')">Accept</button></td>
                 </tr>`;
             });
         });
 
-        function postMatch() {
+        // ==========================================
+        // IP CHECK HELPERS
+        // ==========================================
+        // We never store raw IPs in the public matches collection; only a SHA-256 hash.
+        // Several lookup services are tried in order, since ad blockers often block one or two.
+        // If every one is blocked, this returns null and the match finder keeps working (the IP check is skipped).
+        async function fetchIp() {
+            const sources = [
+                async () => {
+                    const t = await (await fetch('https://www.cloudflare.com/cdn-cgi/trace')).text();
+                    const m = t.match(/^ip=(.+)$/m);
+                    if (!m) throw new Error('no ip');
+                    return m[1].trim();
+                },
+                async () => (await (await fetch('https://api.ipify.org?format=json')).json()).ip,
+                async () => (await (await fetch('https://api64.ipify.org?format=json')).json()).ip,
+                async () => (await (await fetch('https://icanhazip.com')).text()).trim(),
+                async () => (await (await fetch('https://ipapi.co/json/')).json()).ip
+            ];
+            for (const src of sources) {
+                try {
+                    const ip = await src();
+                    if (ip) return ip;
+                } catch (e) { /* blocked or failed, try next */ }
+            }
+            return null;
+        }
+
+        async function getIpHash() {
+            const ip = await fetchIp();
+            if (!ip) return null;
+            const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('1v1lb-salt:' + ip));
+            return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+
+        async function acceptMatch(matchId) {
+            if (!currentUser) return alert("You must be logged in to accept a match.");
+            try {
+                const doc = await db.collection('matches').doc(matchId).get();
+                if (!doc.exists) return alert("This match is no longer available.");
+                const data = doc.data();
+
+                if (data.hostUid === currentUser.uid || data.host === currentGamertag) {
+                    return alert("You can't accept your own match.");
+                }
+
+                const myIpHash = await getIpHash(); // null if blocked; check is skipped
+                if (data.hostIpHash && myIpHash && data.hostIpHash === myIpHash) {
+                    return alert("You can't accept this match: it was posted from the same IP address as your connection.");
+                }
+
+                alert('Match accepted! Message ' + data.host + ' on ' + data.console + ' to start!');
+            } catch (e) {
+                console.error(e);
+                alert("Something went wrong accepting this match. Please try again.");
+            }
+        }
+
+        async function postMatch() {
             if(!currentUser) return alert("You must be logged in to post a match.");
+            if(!currentGamertag) return alert("Your profile is still loading, try again in a second.");
+            const hostIpHash = await getIpHash(); // null if blocked; posting still works
             const cons = document.getElementById('match-console').value;
             const rules = document.getElementById('match-rules').value;
             const series = document.getElementById('match-series').value;
@@ -469,6 +549,8 @@
             
             db.collection('matches').add({
                 host: currentGamertag,
+                hostUid: currentUser.uid,
+                hostIpHash: hostIpHash,
                 console: cons,
                 rules: rules,
                 series: series,
@@ -512,6 +594,9 @@
             if(isNaN(myScore) || isNaN(oppScore)) return alert("Please enter valid numbers for the scores.");
             if(myScore === oppScore) return alert("Matches cannot end in a tie.");
 
+            // Fetch this player's IP hash (null if every lookup is blocked; the report still goes through)
+            const myIpHash = await getIpHash();
+
             // Check if Opponent has already submitted a pending report against you
             const pendingQuery = await db.collection('pending_reports')
                 .where('reporter', '==', opp)
@@ -525,6 +610,7 @@
                     opponent: opp,
                     myScore: myScore,
                     oppScore: oppScore,
+                    ipHash: myIpHash,
                     timestamp: firebase.firestore.FieldValue.serverTimestamp()
                 });
                 alert("Score reported! Waiting for your opponent to report their score. Once they confirm, the Leaderboard will update.");
@@ -532,6 +618,20 @@
                 // Opponent has reported! Compare the scores.
                 const oppDoc = pendingQuery.docs[0];
                 const oppData = oppDoc.data();
+
+                // Same IP on both sides = likely alt account. No points; send to admins instead.
+                if (myIpHash && oppData.ipHash && myIpHash === oppData.ipHash) {
+                    await db.collection('reports').add({
+                        type: 'Same IP - Possible Alt Account',
+                        player1: currentGamertag,
+                        player2: opp,
+                        p1_score: myScore,
+                        p2_score: oppScore,
+                        timestamp: firebase.firestore.FieldValue.serverTimestamp()
+                    });
+                    await oppDoc.ref.delete();
+                    return alert("This match can't be counted: both reports came from the same IP address. It has been sent to an Admin for review.");
+                }
 
                 // Do they agree? (My score = Their Opponent Score AND Their Score = My Opponent Score)
                 if (myScore === oppData.oppScore && oppScore === oppData.myScore) {
@@ -541,30 +641,44 @@
                     const winnerGt = iWon ? currentGamertag : opp;
                     const loserGt = iWon ? opp : currentGamertag;
 
-                    const winnerRef = db.collection('users').where('gamertag', '==', winnerGt);
-                    const loserRef = db.collection('users').where('gamertag', '==', loserGt);
-
-                    const winSnap = await winnerRef.get();
-                    const loseSnap = await loserRef.get();
-
-                    // Update Winner
-                    if(!winSnap.empty) {
-                        await winSnap.docs[0].ref.update({
-                            wins: firebase.firestore.FieldValue.increment(1),
-                            streak: firebase.firestore.FieldValue.increment(1)
-                        });
+                    const winSnap = await db.collection('users').where('gamertag', '==', winnerGt).get();
+                    const loseSnap = await db.collection('users').where('gamertag', '==', loserGt).get();
+                    if (winSnap.empty || loseSnap.empty) {
+                        return alert("Couldn't find both players' accounts, so nothing was counted. Check the gamertags and try again.");
                     }
-                    // Update Loser
-                    if(!loseSnap.empty) {
-                        await loseSnap.docs[0].ref.update({
-                            losses: firebase.firestore.FieldValue.increment(1),
-                            streak: 0
+                    const winRef = winSnap.docs[0].ref;
+                    const loseRef = loseSnap.docs[0].ref;
+
+                    // One series = one win and one loss, plus an Elo swing. Done in a transaction so
+                    // both players update together and simultaneous reports can't corrupt ratings.
+                    let delta = 0, newWinElo = 0, newLoseElo = 0;
+                    await db.runTransaction(async tx => {
+                        const [w, l] = await Promise.all([tx.get(winRef), tx.get(loseRef)]);
+                        const wd = w.data(), ld = l.data();
+                        const wElo = typeof wd.elo === 'number' ? wd.elo : ELO_START;
+                        const lElo = typeof ld.elo === 'number' ? ld.elo : ELO_START;
+
+                        // Standard Elo: upsets move more points than expected wins
+                        const expectedWin = 1 / (1 + Math.pow(10, (lElo - wElo) / 400));
+                        delta = Math.max(1, Math.round(ELO_K * (1 - expectedWin)));
+                        newWinElo = wElo + delta;
+                        newLoseElo = Math.max(0, lElo - delta);
+
+                        tx.update(winRef, {
+                            wins: (wd.wins || 0) + 1,
+                            streak: (wd.streak || 0) + 1,
+                            elo: newWinElo
                         });
-                    }
+                        tx.update(loseRef, {
+                            losses: (ld.losses || 0) + 1,
+                            streak: 0,
+                            elo: newLoseElo
+                        });
+                    });
 
                     // Delete the pending report since it is resolved
                     await oppDoc.ref.delete();
-                    alert("Both players reported matching scores! Leaderboard has been updated successfully.");
+                    alert(`Both players reported matching scores! ${winnerGt} +${delta} Elo (${newWinElo}), ${loserGt} -${delta} Elo (${newLoseElo}).`);
                 } else {
                     // Scores DO NOT Match! Push to Dispute Reports for Admins.
                     await db.collection('reports').add({

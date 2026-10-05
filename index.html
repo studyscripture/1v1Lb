@@ -316,8 +316,6 @@
         // Keep users signed in across page loads and browser restarts
         auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).catch(console.error);
         const db = firebase.firestore();
-        // Local cache so the profile and leaderboard appear instantly on refresh
-        db.enablePersistence({ synchronizeTabs: true }).catch(e => console.warn("Offline cache unavailable:", e.code));
 
         let currentUser = null;
         let currentGamertag = "";
@@ -404,34 +402,21 @@
             if (userUnsub) { userUnsub(); userUnsub = null; }
             if (user) {
                 currentUser = user;
-                renderMatches();
                 // Always show logged-in state right away, then fill in the gamertag live.
                 // (Registration signs the user in BEFORE their profile doc exists, so a one-time
                 // get() could miss it. A snapshot listener picks it up as soon as it's written.)
-                let cachedGt = '';
-                try { cachedGt = localStorage.getItem('gt_' + user.uid) || ''; } catch (e) {}
-                document.getElementById('user-info').innerHTML = cachedGt
-                    ? `Logged in as: <strong style="color:var(--accent)">${cachedGt}</strong>`
-                    : `Logged in. Loading your profile...`;
-                document.getElementById('auth-btn').style.display = 'none'; // no log out button
-                userUnsub = db.collection('users').doc(user.uid).onSnapshot(async doc => {
+                document.getElementById('user-info').innerHTML = `Logged in as: <strong style="color:var(--accent)">${user.email}</strong>`;
+                document.getElementById('auth-btn').style.display = '';
+                document.getElementById('auth-btn').innerText = "Log Out";
+                document.getElementById('auth-btn').onclick = () => auth.signOut();
+                userUnsub = db.collection('users').doc(user.uid).onSnapshot(doc => {
                     if (doc.exists && doc.data().gamertag) {
                         currentGamertag = doc.data().gamertag;
-                        try { localStorage.setItem('gt_' + user.uid, currentGamertag); } catch (e) {}
-                        renderMatches();
                         document.getElementById('user-info').innerHTML = `Logged in as: <strong style="color:var(--accent)">${currentGamertag}</strong>`;
-                        return;
+                    } else if (!registering) {
+                        // Account exists but has no profile (e.g. the profile save failed at sign-up). Let them finish it.
+                        showProfileSetup();
                     }
-                    if (registering) return;
-                    // Don't trust a "missing" answer that only came from the local cache; confirm with the server first
-                    try {
-                        const fresh = await db.collection('users').doc(user.uid).get({ source: 'server' });
-                        if (fresh.exists && fresh.data().gamertag) return; // the listener will fire again with the real data
-                    } catch (e) {
-                        console.warn("Server profile check failed:", e);
-                        return; // offline or blocked: keep showing whatever we have, don't nag for a gamertag
-                    }
-                    showProfileSetup();
                 }, err => {
                     console.error("Profile load error:", err);
                     document.getElementById('user-info').innerHTML =
@@ -440,7 +425,6 @@
             } else {
                 currentUser = null;
                 currentGamertag = "";
-                renderMatches();
                 document.getElementById('user-info').innerText = "Not logged in. Log in to post matches and report scores.";
                 document.getElementById('auth-btn').style.display = '';
                 document.getElementById('auth-btn').innerText = "Login / Register";
@@ -515,50 +499,21 @@
         });
 
         // MATCH FINDER (LIVE LISTENER)
-        let latestMatches = [];
-
-        function isMyMatch(m) {
-            return !!currentUser && (m.hostUid === currentUser.uid || (!m.hostUid && currentGamertag && m.host === currentGamertag));
-        }
-
-        function renderMatches() {
+        db.collection('matches').orderBy('createdAt', 'desc').onSnapshot(snapshot => {
             const mf = document.getElementById('mf-body');
-            if (!latestMatches.length) {
-                mf.innerHTML = '<tr><td colspan="6">No open matches right now. Post one above!</td></tr>';
-                return;
-            }
-            mf.innerHTML = latestMatches.map(({ id, data }) => `<tr>
+            mf.innerHTML = "";
+            snapshot.forEach(doc => {
+                const data = doc.data();
+                mf.innerHTML += `<tr>
                     <td style="color:var(--accent); font-weight:bold;">${data.host}</td>
                     <td>${data.console}</td>
                     <td>${data.series}</td>
                     <td style="max-width: 200px; line-height: 1.4;">${data.maps}</td>
                     <td>${data.rules}</td>
-                    <td style="white-space:nowrap;">
-                        <button class="btn" onclick="acceptMatch('${id}')">Accept</button>
-                        ${isMyMatch(data) ? `<button class="btn btn-red" style="margin-left:6px;" onclick="cancelMatch('${id}')">Cancel</button>` : ''}
-                    </td>
-                </tr>`).join('');
-        }
-
-        db.collection('matches').orderBy('createdAt', 'desc').onSnapshot(snapshot => {
-            latestMatches = snapshot.docs.map(d => ({ id: d.id, data: d.data() }));
-            renderMatches();
+                    <td><button class="btn" onclick="acceptMatch('${doc.id}')">Accept</button></td>
+                </tr>`;
+            });
         });
-
-        async function cancelMatch(matchId) {
-            if (!currentUser) return alert("You must be logged in.");
-            if (!confirm("Cancel this match?")) return;
-            try {
-                const ref = db.collection('matches').doc(matchId);
-                const doc = await ref.get();
-                if (!doc.exists) return; // already gone
-                if (!isMyMatch(doc.data())) return alert("You can only cancel your own match.");
-                await ref.delete();
-            } catch (e) {
-                console.error(e);
-                alert("Couldn't cancel the match: " + (e.code || e.message));
-            }
-        }
 
         // ==========================================
         // IP CHECK HELPERS
@@ -621,28 +576,6 @@
         async function postMatch() {
             if(!currentUser) return alert("You must be logged in to post a match.");
             if(!currentGamertag) return alert("Your profile is still loading, try again in a second.");
-            if(posting) return;
-            posting = true;
-            try {
-                // Only one open match per player (also catches older matches saved without a user id)
-                const [byUid, byName] = await Promise.all([
-                    db.collection('matches').where('hostUid', '==', currentUser.uid).limit(1).get(),
-                    db.collection('matches').where('host', '==', currentGamertag).limit(1).get()
-                ]);
-                if (!byUid.empty || !byName.empty) {
-                    return alert("You already have an open match. Cancel it before posting a new one.");
-                }
-                await postMatchNow();
-            } catch (e) {
-                console.error(e);
-                alert("Couldn't post the match: " + (e.code || e.message));
-            } finally {
-                posting = false;
-            }
-        }
-
-        let posting = false;
-        async function postMatchNow() {
             const hostIpHash = await getIpHash(); // null if blocked; posting still works
             const cons = document.getElementById('match-console').value;
             const rules = document.getElementById('match-rules').value;
@@ -652,7 +585,7 @@
             let mapsArr = [];
             mapSelects.forEach(select => mapsArr.push(select.value));
             
-            await db.collection('matches').add({
+            db.collection('matches').add({
                 host: currentGamertag,
                 hostUid: currentUser.uid,
                 hostIpHash: hostIpHash,

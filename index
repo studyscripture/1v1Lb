@@ -302,12 +302,12 @@
         // 1. FIREBASE CONFIGURATION (PUT YOUR KEYS HERE)
         // ==========================================
         const firebaseConfig = {
-            apiKey: "YOUR_API_KEY",
-            authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
-            projectId: "YOUR_PROJECT_ID",
-            storageBucket: "YOUR_PROJECT_ID.appspot.com",
-            messagingSenderId: "YOUR_SENDER_ID",
-            appId: "YOUR_APP_ID"
+            apiKey: "AIzaSyBrQuNTs4-5aUI8svdodKIWL2oce7Pm4gE",
+            authDomain: "ranks-9c629.firebaseapp.com",
+            projectId: "ranks-9c629",
+            storageBucket: "ranks-9c629.appspot.com",
+            messagingSenderId: "246418284432",
+            appId: "1:246418284432:web:05a45f4e565a4f642f1d15"
         };
         
         if (!firebase.apps.length) { firebase.initializeApp(firebaseConfig); }

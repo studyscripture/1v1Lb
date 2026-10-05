@@ -411,7 +411,9 @@
                 document.getElementById('user-info').innerHTML = cachedGt
                     ? `Logged in as: <strong style="color:var(--accent)">${cachedGt}</strong>`
                     : `Logged in. Loading your profile...`;
-                document.getElementById('auth-btn').style.display = 'none'; // no log out button
+                document.getElementById('auth-btn').style.display = '';
+                document.getElementById('auth-btn').innerText = "Log Out";
+                document.getElementById('auth-btn').onclick = () => auth.signOut();
                 const applyProfile = (data) => {
                     currentGamertag = data.gamertag;
                     try { localStorage.setItem('gt_' + user.uid, currentGamertag); } catch (e) {}
@@ -420,19 +422,27 @@
                 };
                 const showProfileError = (err) => {
                     console.error("Profile load error:", err);
-                    const hint = err.code === 'unavailable'
-                        ? "Can't reach the database. Try turning off ad blockers/VPN for this site, and make sure Firestore is created in your Firebase console."
-                        : "Check your Firestore rules allow signed-in users to read/write their own users/{uid} document.";
                     document.getElementById('user-info').innerHTML =
-                        `<span style="color:#ff1744">Couldn't load your profile (${err.code || err.message}). ${hint}</span>`;
+                        `<span style="color:#ff1744">Couldn't load your profile (${err.code || err.message}). Refresh to try again.</span>`;
                 };
 
-                userUnsub = db.collection('users').doc(user.uid).onSnapshot(doc => {
+                // If the database never answers, say so instead of sitting on "Loading..." forever
+                let gotServerAnswer = false;
+                const unreachableTimer = setTimeout(() => {
+                    if (!gotServerAnswer) {
+                        document.getElementById('user-info').innerHTML =
+`<span style="color:#ff1744">Can't reach the database right now. Refresh to try again.</span>`;
+                    }
+                }, 8000);
+
+                const stopListening = db.collection('users').doc(user.uid).onSnapshot(doc => {
+                    if (!doc.metadata.fromCache) { gotServerAnswer = true; clearTimeout(unreachableTimer); }
                     if (doc.exists && doc.data().gamertag) return applyProfile(doc.data());
                     if (registering) return;
                     // Only ask for a gamertag once the SERVER has confirmed there's no profile
                     if (!doc.metadata.fromCache) showProfileSetup();
-                }, showProfileError);
+                }, err => { clearTimeout(unreachableTimer); showProfileError(err); });
+                userUnsub = () => { stopListening(); clearTimeout(unreachableTimer); };
             } else {
                 currentUser = null;
                 currentGamertag = "";
@@ -578,47 +588,11 @@
             } catch (e) { console.warn("Couldn't clear accepted match:", e); }
         }
 
-        // ==========================================
-        // IP CHECK HELPERS
-        // ==========================================
-        // We never store raw IPs in the public matches collection; only a SHA-256 hash.
-        // Several lookup services are tried in order, since ad blockers often block one or two.
-        // If every one is blocked, this returns null and the match finder keeps working (the IP check is skipped).
-        async function fetchIp() {
-            const sources = [
-                async () => {
-                    const t = await (await fetch('https://www.cloudflare.com/cdn-cgi/trace')).text();
-                    const m = t.match(/^ip=(.+)$/m);
-                    if (!m) throw new Error('no ip');
-                    return m[1].trim();
-                },
-                async () => (await (await fetch('https://api.ipify.org?format=json')).json()).ip,
-                async () => (await (await fetch('https://api64.ipify.org?format=json')).json()).ip,
-                async () => (await (await fetch('https://icanhazip.com')).text()).trim(),
-                async () => (await (await fetch('https://ipapi.co/json/')).json()).ip
-            ];
-            for (const src of sources) {
-                try {
-                    const ip = await src();
-                    if (ip) return ip;
-                } catch (e) { /* blocked or failed, try next */ }
-            }
-            return null;
-        }
-
-        async function getIpHash() {
-            const ip = await fetchIp();
-            if (!ip) return null;
-            const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('1v1lb-salt:' + ip));
-            return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
-        }
-
         async function acceptMatch(matchId) {
             if (!currentUser) return alert("You must be logged in to accept a match.");
             if (!currentGamertag) return alert("Your profile is still loading, try again in a second.");
             try {
                 const ref = db.collection('matches').doc(matchId);
-                const myIpHash = await getIpHash(); // null if blocked; IP check is then skipped
 
                 // Transaction so two players can't both accept, and the host can't cancel mid-accept
                 const info = await db.runTransaction(async tx => {
@@ -628,9 +602,6 @@
 
                     if (data.status === 'accepted') throw new Error("Another player already accepted this match.");
                     if (isMyMatch(data) || data.host === currentGamertag) throw new Error("You can't accept your own match.");
-                    if (data.hostIpHash && myIpHash && data.hostIpHash === myIpHash) {
-                        throw new Error("You can't accept this match: it was posted from the same IP address as your connection.");
-                    }
 
                     tx.update(ref, {
                         status: 'accepted',
@@ -673,7 +644,6 @@
 
         let posting = false;
         async function postMatchNow() {
-            const hostIpHash = await getIpHash(); // null if blocked; posting still works
             const cons = document.getElementById('match-console').value;
             const rules = document.getElementById('match-rules').value;
             const series = document.getElementById('match-series').value;
@@ -685,7 +655,6 @@
             await db.collection('matches').add({
                 host: currentGamertag,
                 hostUid: currentUser.uid,
-                hostIpHash: hostIpHash,
                 console: cons,
                 rules: rules,
                 series: series,
@@ -729,9 +698,6 @@
             if(isNaN(myScore) || isNaN(oppScore)) return alert("Please enter valid numbers for the scores.");
             if(myScore === oppScore) return alert("Matches cannot end in a tie.");
 
-            // Fetch this player's IP hash (null if every lookup is blocked; the report still goes through)
-            const myIpHash = await getIpHash();
-
             // Check if Opponent has already submitted a pending report against you
             const pendingQuery = await db.collection('pending_reports')
                 .where('reporter', '==', opp)
@@ -745,7 +711,6 @@
                     opponent: opp,
                     myScore: myScore,
                     oppScore: oppScore,
-                    ipHash: myIpHash,
                     timestamp: firebase.firestore.FieldValue.serverTimestamp()
                 });
                 alert("Score reported! Waiting for your opponent to report their score. Once they confirm, the Leaderboard will update.");
@@ -753,21 +718,6 @@
                 // Opponent has reported! Compare the scores.
                 const oppDoc = pendingQuery.docs[0];
                 const oppData = oppDoc.data();
-
-                // Same IP on both sides = likely alt account. No points; send to admins instead.
-                if (myIpHash && oppData.ipHash && myIpHash === oppData.ipHash) {
-                    await db.collection('reports').add({
-                        type: 'Same IP - Possible Alt Account',
-                        player1: currentGamertag,
-                        player2: opp,
-                        p1_score: myScore,
-                        p2_score: oppScore,
-                        timestamp: firebase.firestore.FieldValue.serverTimestamp()
-                    });
-                    await oppDoc.ref.delete();
-                    await clearAcceptedMatch(currentGamertag, opp);
-                    return alert("This match can't be counted: both reports came from the same IP address. It has been sent to an Admin for review.");
-                }
 
                 // Do they agree? (My score = Their Opponent Score AND Their Score = My Opponent Score)
                 if (myScore === oppData.oppScore && oppScore === oppData.myScore) {

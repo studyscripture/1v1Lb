@@ -36,6 +36,9 @@
         
         /* User Bar */
         #user-bar { background: var(--bg-panel); padding: 10px 20px; margin-bottom: 20px; display: flex; justify-content: space-between; border-left: 4px solid var(--accent); }
+
+        /* Email verification banner */
+        #verify-bar { display: none; background: #2a1f00; border-left: 4px solid #ffb300; padding: 10px 20px; margin-bottom: 20px; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; color: #ffd666; }
         
         /* Tabs */
         .tab { display: none; background: var(--bg-panel); padding: 20px; border: 1px solid var(--border); }
@@ -89,6 +92,9 @@
             <span id="user-info">Not logged in. Log in to post matches and report scores.</span>
             <button id="auth-btn" class="btn" onclick="showTab('auth')">Login / Register</button>
         </div>
+
+        <!-- Email verification banner (shown only to signed-in, unverified users) -->
+        <div id="verify-bar"></div>
 
         <!-- AUTH TAB -->
         <div id="auth" class="tab">
@@ -185,7 +191,7 @@
             </div>
         </div>
 
-        <!-- REPORT TAB (UPDATED WITH AUTO-AGREEMENT) -->
+        <!-- REPORT TAB (AUTO-AGREEMENT) -->
         <div id="report" class="tab">
             <h2>Report Score / File Dispute</h2>
             <p style="margin-bottom: 20px;">Report the exact score (e.g. 2 to 0). If your opponent reports the matching score, the leaderboard updates automatically. If scores conflict, it goes into a dispute for an admin to review.</p>
@@ -286,6 +292,7 @@
                 <li>Reporting fake wins/losses without a match occurring results in suspension.</li>
                 <li>If a player fails to arrive, the other player must provide valid proof of absence to claim a forfeit win.</li>
                 <li>Players MUST use the exact in-game usernames displayed on their 1v1LB Profile.</li>
+                <li>One account per player. Alt accounts, or playing yourself to gain points, result in a ban. Repeat matches between the same two players earn reduced Elo, and are unrated after the fourth in a week.</li>
             </ul>
 
             <h3>7. Disputes</h3>
@@ -300,7 +307,7 @@
 
     <script>
         // ==========================================
-        // 1. FIREBASE CONFIGURATION (PUT YOUR KEYS HERE)
+        // 1. FIREBASE CONFIGURATION
         // ==========================================
         const firebaseConfig = {
             apiKey: "AIzaSyBrQuNTs4-5aUI8svdodKIWL2oce7Pm4gE",
@@ -319,17 +326,69 @@
 
         let currentUser = null;
         let currentGamertag = "";
+        let playersCache = []; // every user doc, kept live by the leaderboard listener
 
-        // ELO SETTINGS
-        const ELO_START = 1000; // starting rating for new players
-        const ELO_K = 32;       // max points swing per series; raise for faster movement
+        // ==========================================
+        // SETTINGS
+        // ==========================================
+        // Elo
+        const ELO_START = 1000;
+        const ELO_K = 32;
+
+        // Alt / self-play protection (none of this uses IP addresses, so VPNs and ad blockers are unaffected)
+        const REQUIRE_VERIFIED_EMAIL = true;        // must verify email before posting/accepting/reporting
+        const PAIR_WINDOW_DAYS = 7;                 // how far back "repeat opponent" looks
+        const PAIR_MULTIPLIERS = [1, 1, 0.5, 0.25]; // Elo multiplier for the 1st, 2nd, 3rd, 4th meeting in the window; 5th+ is unrated
+        const FLAG_PAIR_AT = 3;                     // flag the pairing for admins once they've already met this many times in the window
+        const PROVISIONAL_GAMES = 5;                // an opponent with fewer rated games than this is "new"
+        const PROVISIONAL_MULT = 0.5;               // beating a brand-new account is worth half
+        const DISPOSABLE_DOMAINS = [
+            'mailinator.com','guerrillamail.com','10minutemail.com','tempmail.com','temp-mail.org','yopmail.com',
+            'trashmail.com','sharklasers.com','getnada.com','throwawaymail.com','maildrop.cc','dispostable.com',
+            'fakeinbox.com','mintemail.com','mohmal.com'
+        ];
+
+        // ==========================================
+        // HELPERS
+        // ==========================================
+        // Escape anything a user typed before it goes into innerHTML (stops script injection through gamertags)
+        function esc(s) {
+            return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+        }
+
+        // Collapses gmail dots / +tags so one mailbox can't register many accounts
+        function emailKey(email) {
+            const e = String(email || '').trim().toLowerCase();
+            const at = e.lastIndexOf('@');
+            if (at < 1) return e;
+            let local = e.slice(0, at).split('+')[0];
+            let domain = e.slice(at + 1);
+            if (domain === 'googlemail.com') domain = 'gmail.com';
+            if (domain === 'gmail.com') local = local.replace(/\./g, '');
+            return local + '@' + domain;
+        }
+
+        function findPlayer(typed) {
+            const t = String(typed || '').trim().toLowerCase();
+            if (!t) return null;
+            return playersCache.find(p => p.gamertag && p.gamertag.toLowerCase() === t) || null;
+        }
+
+        async function gamertagTaken(gt, uid) {
+            const lower = gt.toLowerCase();
+            if (playersCache.some(p => p.uid !== uid && (p.gamertag || '').toLowerCase() === lower)) return true;
+            const [a, b] = await Promise.all([
+                db.collection('users').where('gamertagLower', '==', lower).get(),
+                db.collection('users').where('gamertag', '==', gt).get()
+            ]);
+            return a.docs.concat(b.docs).some(d => d.id !== uid);
+        }
 
         // UI & TABS
         function showTab(tabId) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
             document.getElementById(tabId).classList.add('active');
-            // Highlight the matching nav button (no reliance on window.event, which is null in async callbacks)
             const navBtn = document.querySelector(`nav button[data-tab="${tabId}"]`);
             if (navBtn) navBtn.classList.add('active');
         }
@@ -374,58 +433,132 @@
             container.innerHTML = html;
         }
 
-        // AUTHENTICATION
+        // ==========================================
+        // EMAIL VERIFICATION
+        // ==========================================
+        function isVerified() {
+            return !REQUIRE_VERIFIED_EMAIL || (currentUser && currentUser.emailVerified);
+        }
+
+        function requireVerified(action) {
+            if (!currentUser) { alert(`You must be logged in to ${action}.`); return false; }
+            if (!isVerified()) { alert(`Verify your email address before you ${action}. Use the yellow banner at the top to send yourself a link.`); return false; }
+            return true;
+        }
+
+        function renderVerifyBar() {
+            const bar = document.getElementById('verify-bar');
+            if (REQUIRE_VERIFIED_EMAIL && currentUser && !currentUser.emailVerified) {
+                bar.style.display = 'flex';
+                bar.innerHTML = `<span>Verify your email (${esc(currentUser.email)}) to post matches and report scores.</span>
+                    <span><button class="btn" onclick="sendVerification()">Send link</button>
+                    <button class="btn" onclick="refreshVerification()">I've verified</button></span>`;
+            } else {
+                bar.style.display = 'none';
+                bar.innerHTML = '';
+            }
+        }
+
+        async function sendVerification() {
+            try {
+                await currentUser.sendEmailVerification();
+                alert("Verification email sent. Check your inbox (and spam), click the link, then press \"I've verified\".");
+            } catch (e) { alert(e.message); }
+        }
+
+        async function refreshVerification() {
+            try {
+                await currentUser.reload();
+                currentUser = auth.currentUser;
+                renderVerifyBar();
+                alert(currentUser.emailVerified ? "Email verified. You're good to go!" : "Not verified yet. Click the link in the email first.");
+            } catch (e) { alert(e.message); }
+        }
+
+        // ==========================================
+        // AUTHENTICATION & PROFILE
+        // ==========================================
         let userUnsub = null;
+        let profileTimer = null;
         let registering = false;
 
+        function setUserInfo(html) { document.getElementById('user-info').innerHTML = html; }
+
         function showProfileSetup() {
-            document.getElementById('user-info').innerHTML =
+            if (document.getElementById('setup-gt')) return; // don't wipe what they're typing
+            setUserInfo(
                 `Finish your profile: <input id="setup-gt" placeholder="Xbox/PSN Gamertag (Exact)" style="width:220px; display:inline-block; margin:0 6px;">
-                 <button class="btn" onclick="saveProfile()">Save</button>`;
+                 <button class="btn" onclick="saveProfile()">Save</button>`);
         }
 
         async function saveProfile() {
             if (!currentUser) return;
             const gt = document.getElementById('setup-gt').value.trim();
             if (!gt) return alert("Gamertag required");
+            if (gt.length > 24) return alert("Gamertag is too long (24 characters max).");
             try {
-                const taken = await db.collection('users').where('gamertag', '==', gt).get();
-                if (!taken.empty && taken.docs[0].id !== currentUser.uid) return alert("That gamertag is already taken.");
-                await db.collection('users').doc(currentUser.uid).set(
-                    { gamertag: gt, elo: ELO_START, wins: 0, losses: 0, streak: 0 }, { merge: true });
+                if (await gamertagTaken(gt, currentUser.uid)) return alert("That gamertag is already taken.");
+                const ref = db.collection('users').doc(currentUser.uid);
+                const snap = await ref.get();
+                const existing = snap.exists ? snap.data() : {};
+                // Only fill in what's missing, so an existing account never has its stats reset
+                const data = { gamertag: gt, gamertagLower: gt.toLowerCase(), emailKey: emailKey(currentUser.email) };
+                if (typeof existing.elo !== 'number') data.elo = ELO_START;
+                if (typeof existing.wins !== 'number') data.wins = 0;
+                if (typeof existing.losses !== 'number') data.losses = 0;
+                if (typeof existing.streak !== 'number') data.streak = 0;
+                if (!existing.createdAt) data.createdAt = firebase.firestore.FieldValue.serverTimestamp();
+                await ref.set(data, { merge: true });
             } catch (e) {
                 console.error(e);
                 alert("Couldn't save your profile: " + (e.code || e.message));
             }
         }
+
         auth.onAuthStateChanged(user => {
             if (userUnsub) { userUnsub(); userUnsub = null; }
+            clearTimeout(profileTimer);
+
             if (user) {
                 currentUser = user;
-                // Always show logged-in state right away, then fill in the gamertag live.
-                // (Registration signs the user in BEFORE their profile doc exists, so a one-time
-                // get() could miss it. A snapshot listener picks it up as soon as it's written.)
-                document.getElementById('user-info').innerHTML = `Logged in as: <strong style="color:var(--accent)">${user.email}</strong>`;
+                currentGamertag = "";
+                renderVerifyBar();
+                setUserInfo(`Loading profile for <strong style="color:var(--accent)">${esc(user.email)}</strong>…`);
                 document.getElementById('auth-btn').style.display = '';
                 document.getElementById('auth-btn').innerText = "Log Out";
                 document.getElementById('auth-btn').onclick = () => auth.signOut();
-                userUnsub = db.collection('users').doc(user.uid).onSnapshot(doc => {
+
+                // If the database never answers (ad blocker / privacy extension blocking Firestore), say so instead of guessing.
+                profileTimer = setTimeout(() => {
+                    if (!currentGamertag && !document.getElementById('setup-gt')) {
+                        setUserInfo(`<span style="color:#ff1744">Can't reach the database. If you use an ad blocker or privacy extension, allow <b>firestore.googleapis.com</b> for this site, then refresh.</span>`);
+                    }
+                }, 8000);
+
+                // includeMetadataChanges lets us tell a real "no profile" answer (from the server)
+                // apart from a "nothing cached yet" answer, which is what made the prompt appear on every refresh.
+                userUnsub = db.collection('users').doc(user.uid).onSnapshot({ includeMetadataChanges: true }, doc => {
                     if (doc.exists && doc.data().gamertag) {
+                        clearTimeout(profileTimer);
                         currentGamertag = doc.data().gamertag;
-                        document.getElementById('user-info').innerHTML = `Logged in as: <strong style="color:var(--accent)">${currentGamertag}</strong>`;
+                        setUserInfo(`Logged in as: <strong style="color:var(--accent)">${esc(currentGamertag)}</strong>`);
+                    } else if (doc.metadata.fromCache) {
+                        // Not confirmed by the server yet. Keep waiting rather than nagging.
                     } else if (!registering) {
-                        // Account exists but has no profile (e.g. the profile save failed at sign-up). Let them finish it.
+                        clearTimeout(profileTimer);
+                        console.warn("No gamertag on users/" + user.uid + " (server confirmed). Showing profile setup.");
                         showProfileSetup();
                     }
                 }, err => {
+                    clearTimeout(profileTimer);
                     console.error("Profile load error:", err);
-                    document.getElementById('user-info').innerHTML =
-                        `<span style="color:#ff1744">Couldn't load your profile (${err.code || err.message}). Check your Firestore rules allow signed-in users to read/write their own users/{uid} document.</span>`;
+                    setUserInfo(`<span style="color:#ff1744">Couldn't load your profile (${esc(err.code || err.message)}). Check your Firestore rules allow signed-in users to read/write their own users/{uid} document.</span>`);
                 });
             } else {
                 currentUser = null;
                 currentGamertag = "";
-                document.getElementById('user-info').innerText = "Not logged in. Log in to post matches and report scores.";
+                renderVerifyBar();
+                setUserInfo("Not logged in. Log in to post matches and report scores.");
                 document.getElementById('auth-btn').style.display = '';
                 document.getElementById('auth-btn').innerText = "Login / Register";
                 document.getElementById('auth-btn').onclick = () => showTab('auth');
@@ -436,26 +569,51 @@
             const email = document.getElementById('reg-email').value.trim();
             const pass = document.getElementById('reg-pass').value;
             const gt = document.getElementById('reg-gt').value.trim();
-            if(!gt) return alert("Gamertag required");
+            if (!gt) return alert("Gamertag required");
+            if (gt.length > 24) return alert("Gamertag is too long (24 characters max).");
+
+            const domain = (email.split('@')[1] || '').toLowerCase();
+            if (DISPOSABLE_DOMAINS.includes(domain)) return alert("Disposable email addresses aren't allowed. Please use a real email.");
 
             registering = true; // stops the profile-setup prompt from flashing while we save
+            let ok = false;
             try {
                 const cred = await auth.createUserWithEmailAndPassword(email, pass);
+
+                // Duplicate checks (done signed-in so they work with typical Firestore rules)
+                const dupMail = await db.collection('users').where('emailKey', '==', emailKey(email)).get();
+                if (!dupMail.empty) {
+                    await cred.user.delete();
+                    return alert("An account already exists for that email address.");
+                }
+                if (await gamertagTaken(gt, cred.user.uid)) {
+                    await cred.user.delete();
+                    return alert("That gamertag is already taken.");
+                }
+
                 await db.collection('users').doc(cred.user.uid).set({
                     gamertag: gt,
+                    gamertagLower: gt.toLowerCase(),
+                    emailKey: emailKey(email),
                     elo: ELO_START,
                     wins: 0,
                     losses: 0,
-                    streak: 0
+                    streak: 0,
+                    createdAt: firebase.firestore.FieldValue.serverTimestamp()
                 });
-                alert("Account Created! Welcome to 1v1LB.");
+                ok = true;
+
+                let mailNote = "";
+                try { await cred.user.sendEmailVerification(); mailNote = " We sent a verification link to your email. Verify it to post matches and report scores."; }
+                catch (e) { console.error(e); mailNote = " Use the yellow banner to send your verification email."; }
+                alert("Account Created! Welcome to 1v1LB." + mailNote);
                 showTab('leaderboard');
             } catch (err) {
                 alert(err.message);
             } finally {
                 registering = false;
                 // If the profile save failed, let the signed-in user finish it
-                if (currentUser && !currentGamertag) showProfileSetup();
+                if (!ok && auth.currentUser && !currentGamertag) showProfileSetup();
             }
         }
 
@@ -467,17 +625,18 @@
             }).catch(err => alert(err.message));
         }
 
+        // ==========================================
         // LEADERBOARD (LIVE LISTENER) - ranked by Elo, then wins
-        // Sorted in the browser so older accounts without an elo field still show up (as 1000).
+        // ==========================================
         db.collection('users').onSnapshot(snapshot => {
-            const lb = document.getElementById('lb-body');
-            const players = snapshot.docs.map(d => {
-                const x = d.data();
-                return { ...x, elo: typeof x.elo === 'number' ? x.elo : ELO_START, wins: x.wins || 0, losses: x.losses || 0 };
-            });
+            playersCache = snapshot.docs.map(d => ({ uid: d.id, ...d.data() }));
+
+            const players = playersCache
+                .filter(p => p.gamertag)
+                .map(x => ({ ...x, elo: typeof x.elo === 'number' ? x.elo : ELO_START, wins: x.wins || 0, losses: x.losses || 0 }));
             players.sort((a, b) => b.elo - a.elo || b.wins - a.wins);
 
-            lb.innerHTML = "";
+            let html = "";
             players.slice(0, 50).forEach((data, i) => {
                 let wlRatio = "0.00";
                 if (data.losses === 0 && data.wins > 0) wlRatio = data.wins.toFixed(2);
@@ -486,9 +645,9 @@
                 const currentStreak = data.streak || 0;
                 const streakDisplay = currentStreak >= 3 ? `<span class="streak-fire">🔥 ${currentStreak}</span>` : currentStreak;
 
-                lb.innerHTML += `<tr>
+                html += `<tr>
                     <td>#${i + 1}</td>
-                    <td style="color:var(--accent); font-weight:bold;">${data.gamertag}</td>
+                    <td style="color:var(--accent); font-weight:bold;">${esc(data.gamertag)}</td>
                     <td style="color:var(--text-light); font-weight:bold;">${data.elo}</td>
                     <td style="color:#00e676;">${data.wins}</td>
                     <td style="color:#ff1744;">${data.losses}</td>
@@ -496,62 +655,37 @@
                     <td>${streakDisplay}</td>
                 </tr>`;
             });
+            document.getElementById('lb-body').innerHTML = html || '<tr><td colspan="7">No players yet.</td></tr>';
+        }, err => {
+            console.error("Leaderboard error:", err);
+            document.getElementById('lb-body').innerHTML = `<tr><td colspan="7" style="color:#ff1744">Couldn't load rankings (${esc(err.code || err.message)}). If you use an ad blocker, allow firestore.googleapis.com for this site.</td></tr>`;
         });
 
+        // ==========================================
         // MATCH FINDER (LIVE LISTENER)
+        // ==========================================
         db.collection('matches').orderBy('createdAt', 'desc').onSnapshot(snapshot => {
-            const mf = document.getElementById('mf-body');
-            mf.innerHTML = "";
+            let html = "";
             snapshot.forEach(doc => {
                 const data = doc.data();
-                mf.innerHTML += `<tr>
-                    <td style="color:var(--accent); font-weight:bold;">${data.host}</td>
-                    <td>${data.console}</td>
-                    <td>${data.series}</td>
-                    <td style="max-width: 200px; line-height: 1.4;">${data.maps}</td>
-                    <td>${data.rules}</td>
-                    <td><button class="btn" onclick="acceptMatch('${doc.id}')">Accept</button></td>
+                html += `<tr>
+                    <td style="color:var(--accent); font-weight:bold;">${esc(data.host)}</td>
+                    <td>${esc(data.console)}</td>
+                    <td>${esc(data.series)}</td>
+                    <td style="max-width: 200px; line-height: 1.4;">${esc(data.maps)}</td>
+                    <td>${esc(data.rules)}</td>
+                    <td><button class="btn" onclick="acceptMatch('${esc(doc.id)}')">Accept</button></td>
                 </tr>`;
             });
+            document.getElementById('mf-body').innerHTML = html || '<tr><td colspan="6">No open matches right now.</td></tr>';
+        }, err => {
+            console.error("Match finder error:", err);
+            document.getElementById('mf-body').innerHTML = `<tr><td colspan="6" style="color:#ff1744">Couldn't load matches (${esc(err.code || err.message)}).</td></tr>`;
         });
 
-        // ==========================================
-        // IP CHECK HELPERS
-        // ==========================================
-        // We never store raw IPs in the public matches collection; only a SHA-256 hash.
-        // Several lookup services are tried in order, since ad blockers often block one or two.
-        // If every one is blocked, this returns null and the match finder keeps working (the IP check is skipped).
-        async function fetchIp() {
-            const sources = [
-                async () => {
-                    const t = await (await fetch('https://www.cloudflare.com/cdn-cgi/trace')).text();
-                    const m = t.match(/^ip=(.+)$/m);
-                    if (!m) throw new Error('no ip');
-                    return m[1].trim();
-                },
-                async () => (await (await fetch('https://api.ipify.org?format=json')).json()).ip,
-                async () => (await (await fetch('https://api64.ipify.org?format=json')).json()).ip,
-                async () => (await (await fetch('https://icanhazip.com')).text()).trim(),
-                async () => (await (await fetch('https://ipapi.co/json/')).json()).ip
-            ];
-            for (const src of sources) {
-                try {
-                    const ip = await src();
-                    if (ip) return ip;
-                } catch (e) { /* blocked or failed, try next */ }
-            }
-            return null;
-        }
-
-        async function getIpHash() {
-            const ip = await fetchIp();
-            if (!ip) return null;
-            const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('1v1lb-salt:' + ip));
-            return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
-        }
-
         async function acceptMatch(matchId) {
-            if (!currentUser) return alert("You must be logged in to accept a match.");
+            if (!requireVerified('accept a match')) return;
+            if (!currentGamertag) return alert("Your profile is still loading, try again in a second.");
             try {
                 const doc = await db.collection('matches').doc(matchId).get();
                 if (!doc.exists) return alert("This match is no longer available.");
@@ -559,11 +693,6 @@
 
                 if (data.hostUid === currentUser.uid || data.host === currentGamertag) {
                     return alert("You can't accept your own match.");
-                }
-
-                const myIpHash = await getIpHash(); // null if blocked; check is skipped
-                if (data.hostIpHash && myIpHash && data.hostIpHash === myIpHash) {
-                    return alert("You can't accept this match: it was posted from the same IP address as your connection.");
                 }
 
                 alert('Match accepted! Message ' + data.host + ' on ' + data.console + ' to start!');
@@ -574,9 +703,8 @@
         }
 
         async function postMatch() {
-            if(!currentUser) return alert("You must be logged in to post a match.");
-            if(!currentGamertag) return alert("Your profile is still loading, try again in a second.");
-            const hostIpHash = await getIpHash(); // null if blocked; posting still works
+            if (!requireVerified('post a match')) return;
+            if (!currentGamertag) return alert("Your profile is still loading, try again in a second.");
             const cons = document.getElementById('match-console').value;
             const rules = document.getElementById('match-rules').value;
             const series = document.getElementById('match-series').value;
@@ -585,155 +713,192 @@
             let mapsArr = [];
             mapSelects.forEach(select => mapsArr.push(select.value));
             
-            db.collection('matches').add({
-                host: currentGamertag,
-                hostUid: currentUser.uid,
-                hostIpHash: hostIpHash,
-                console: cons,
-                rules: rules,
-                series: series,
-                maps: mapsArr.join(' / '),
-                createdAt: firebase.firestore.FieldValue.serverTimestamp()
-            }).then(() => {
+            try {
+                await db.collection('matches').add({
+                    host: currentGamertag,
+                    hostUid: currentUser.uid,
+                    console: cons,
+                    rules: rules,
+                    series: series,
+                    maps: mapsArr.join(' / '),
+                    createdAt: firebase.firestore.FieldValue.serverTimestamp()
+                });
                 alert("Match posted to the board!");
-            });
+            } catch (e) {
+                console.error(e);
+                alert("Couldn't post your match: " + (e.code || e.message));
+            }
         }
 
         // ==========================================
         // SMART REPORTING / AUTO-AGREEMENT LOGIC
         // ==========================================
         async function submitReport() {
-            if(!currentUser) return alert("You must be logged in to report a score.");
-            
-            const opp = document.getElementById('rep-opp').value;
-            if(opp.toLowerCase() === currentGamertag.toLowerCase()) return alert("You cannot report a match against yourself.");
-            
-            const type = document.getElementById('rep-type').value;
-            const proof = document.getElementById('rep-proof').value;
+            if (!requireVerified('report a score')) return;
+            if (!currentGamertag) return alert("Your profile is still loading, try again in a second.");
 
-            // Handle Direct Dispute
-            if(type === 'dispute') {
-                if(!proof) return alert("You MUST provide a video/picture proof link to file a direct dispute.");
-                await db.collection('reports').add({
-                    type: 'Direct Dispute',
-                    submitter: currentGamertag,
-                    opponent: opp,
-                    proof: proof,
-                    timestamp: firebase.firestore.FieldValue.serverTimestamp()
-                });
-                alert("Dispute submitted. An Admin will review the evidence.");
-                return;
-            }
+            try {
+                // Resolve what they typed to the real gamertag (case-insensitive) so typos can't create reports that never match
+                const oppPlayer = findPlayer(document.getElementById('rep-opp').value);
+                if (!oppPlayer) return alert("No player found with that gamertag. Check the spelling.");
+                if (oppPlayer.uid === currentUser.uid) return alert("You cannot report a match against yourself.");
+                const opp = oppPlayer.gamertag;
 
-            // Handle Standard Score Report
-            const myScore = parseInt(document.getElementById('rep-my-score').value);
-            const oppScore = parseInt(document.getElementById('rep-opp-score').value);
-            
-            if(isNaN(myScore) || isNaN(oppScore)) return alert("Please enter valid numbers for the scores.");
-            if(myScore === oppScore) return alert("Matches cannot end in a tie.");
+                const type = document.getElementById('rep-type').value;
+                const proof = document.getElementById('rep-proof').value.trim();
 
-            // Fetch this player's IP hash (null if every lookup is blocked; the report still goes through)
-            const myIpHash = await getIpHash();
+                // Handle Direct Dispute
+                if (type === 'dispute') {
+                    if (!proof) return alert("You MUST provide a video/picture proof link to file a direct dispute.");
+                    await db.collection('reports').add({
+                        type: 'Direct Dispute',
+                        submitter: currentGamertag,
+                        submitterUid: currentUser.uid,
+                        opponent: opp,
+                        opponentUid: oppPlayer.uid,
+                        proof: proof,
+                        timestamp: firebase.firestore.FieldValue.serverTimestamp()
+                    });
+                    return alert("Dispute submitted. An Admin will review the evidence.");
+                }
 
-            // Check if Opponent has already submitted a pending report against you
-            const pendingQuery = await db.collection('pending_reports')
-                .where('reporter', '==', opp)
-                .where('opponent', '==', currentGamertag)
-                .get();
+                // Handle Standard Score Report
+                const myScore = parseInt(document.getElementById('rep-my-score').value);
+                const oppScore = parseInt(document.getElementById('rep-opp-score').value);
+                if (isNaN(myScore) || isNaN(oppScore)) return alert("Please enter valid numbers for the scores.");
+                if (myScore === oppScore) return alert("Matches cannot end in a tie.");
 
-            if (pendingQuery.empty) {
-                // No report from opponent yet, save to pending
-                await db.collection('pending_reports').add({
-                    reporter: currentGamertag,
-                    opponent: opp,
-                    myScore: myScore,
-                    oppScore: oppScore,
-                    ipHash: myIpHash,
-                    timestamp: firebase.firestore.FieldValue.serverTimestamp()
-                });
-                alert("Score reported! Waiting for your opponent to report their score. Once they confirm, the Leaderboard will update.");
-            } else {
-                // Opponent has reported! Compare the scores.
+                // Has the opponent already reported against me?
+                const pendingQuery = await db.collection('pending_reports')
+                    .where('reporter', '==', opp)
+                    .where('opponent', '==', currentGamertag)
+                    .get();
+
+                if (pendingQuery.empty) {
+                    await db.collection('pending_reports').add({
+                        reporter: currentGamertag,
+                        reporterUid: currentUser.uid,
+                        opponent: opp,
+                        opponentUid: oppPlayer.uid,
+                        myScore: myScore,
+                        oppScore: oppScore,
+                        timestamp: firebase.firestore.FieldValue.serverTimestamp()
+                    });
+                    return alert("Score reported! Waiting for your opponent to report their score. Once they confirm, the Leaderboard will update.");
+                }
+
                 const oppDoc = pendingQuery.docs[0];
                 const oppData = oppDoc.data();
 
-                // Same IP on both sides = likely alt account. No points; send to admins instead.
-                if (myIpHash && oppData.ipHash && myIpHash === oppData.ipHash) {
-                    await db.collection('reports').add({
-                        type: 'Same IP - Possible Alt Account',
-                        player1: currentGamertag,
-                        player2: opp,
-                        p1_score: myScore,
-                        p2_score: oppScore,
-                        timestamp: firebase.firestore.FieldValue.serverTimestamp()
-                    });
-                    await oppDoc.ref.delete();
-                    return alert("This match can't be counted: both reports came from the same IP address. It has been sent to an Admin for review.");
-                }
-
-                // Do they agree? (My score = Their Opponent Score AND Their Score = My Opponent Score)
                 if (myScore === oppData.oppScore && oppScore === oppData.myScore) {
-                    
-                    // Scores Match! Auto-Update the Leaderboard.
-                    const iWon = myScore > oppScore;
-                    const winnerGt = iWon ? currentGamertag : opp;
-                    const loserGt = iWon ? opp : currentGamertag;
-
-                    const winSnap = await db.collection('users').where('gamertag', '==', winnerGt).get();
-                    const loseSnap = await db.collection('users').where('gamertag', '==', loserGt).get();
-                    if (winSnap.empty || loseSnap.empty) {
-                        return alert("Couldn't find both players' accounts, so nothing was counted. Check the gamertags and try again.");
-                    }
-                    const winRef = winSnap.docs[0].ref;
-                    const loseRef = loseSnap.docs[0].ref;
-
-                    // One series = one win and one loss, plus an Elo swing. Done in a transaction so
-                    // both players update together and simultaneous reports can't corrupt ratings.
-                    let delta = 0, newWinElo = 0, newLoseElo = 0;
-                    await db.runTransaction(async tx => {
-                        const [w, l] = await Promise.all([tx.get(winRef), tx.get(loseRef)]);
-                        const wd = w.data(), ld = l.data();
-                        const wElo = typeof wd.elo === 'number' ? wd.elo : ELO_START;
-                        const lElo = typeof ld.elo === 'number' ? ld.elo : ELO_START;
-
-                        // Standard Elo: upsets move more points than expected wins
-                        const expectedWin = 1 / (1 + Math.pow(10, (lElo - wElo) / 400));
-                        delta = Math.max(1, Math.round(ELO_K * (1 - expectedWin)));
-                        newWinElo = wElo + delta;
-                        newLoseElo = Math.max(0, lElo - delta);
-
-                        tx.update(winRef, {
-                            wins: (wd.wins || 0) + 1,
-                            streak: (wd.streak || 0) + 1,
-                            elo: newWinElo
-                        });
-                        tx.update(loseRef, {
-                            losses: (ld.losses || 0) + 1,
-                            streak: 0,
-                            elo: newLoseElo
-                        });
-                    });
-
-                    // Delete the pending report since it is resolved
-                    await oppDoc.ref.delete();
-                    alert(`Both players reported matching scores! ${winnerGt} +${delta} Elo (${newWinElo}), ${loserGt} -${delta} Elo (${newLoseElo}).`);
+                    await resolveMatch(oppPlayer, myScore, oppScore, oppDoc);
                 } else {
-                    // Scores DO NOT Match! Push to Dispute Reports for Admins.
+                    // Scores DO NOT match: push to disputes for admins
                     await db.collection('reports').add({
                         type: 'Conflicting Scores Dispute',
                         player1: currentGamertag,
+                        player1Uid: currentUser.uid,
                         p1_claims_my_score: myScore,
                         p1_claims_opp_score: oppScore,
                         player2: opp,
+                        player2Uid: oppPlayer.uid,
                         p2_claims_my_score: oppData.myScore,
                         p2_claims_opp_score: oppData.oppScore,
                         timestamp: firebase.firestore.FieldValue.serverTimestamp()
                     });
-
-                    // Delete pending report so it doesn't get stuck
                     await oppDoc.ref.delete();
                     alert("CONFLICT! You and your opponent reported different scores. This match has been locked and sent to an Admin for review.");
                 }
+            } catch (e) {
+                console.error(e);
+                alert("Couldn't submit your report: " + (e.code || e.message));
+            }
+        }
+
+        // Both players agreed on the score. Apply Elo, with protection against alt/self-play farming.
+        async function resolveMatch(oppPlayer, myScore, oppScore, oppDoc) {
+            const me = { uid: currentUser.uid, gt: currentGamertag };
+            const them = { uid: oppPlayer.uid, gt: oppPlayer.gamertag };
+            const iWon = myScore > oppScore;
+            const winner = iWon ? me : them;
+            const loser = iWon ? them : me;
+            const winRef = db.collection('users').doc(winner.uid);
+            const loseRef = db.collection('users').doc(loser.uid);
+
+            // How many times have these two already played in the last week?
+            // (Only equality filter in the query, so no custom Firestore index is needed.)
+            const pairKey = [me.uid, them.uid].sort().join('_');
+            const since = Date.now() - PAIR_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+            const prev = await db.collection('match_results').where('pairKey', '==', pairKey).get();
+            const recent = prev.docs.filter(d => {
+                const t = d.data().timestamp;
+                return t && t.toMillis() >= since;
+            }).length;
+            const pairMult = recent < PAIR_MULTIPLIERS.length ? PAIR_MULTIPLIERS[recent] : 0;
+
+            const out = {};
+            await db.runTransaction(async tx => {
+                const [w, l, pend] = await Promise.all([tx.get(winRef), tx.get(loseRef), tx.get(oppDoc.ref)]);
+                if (!pend.exists) throw new Error("This report was already processed.");
+                if (!w.exists || !l.exists) throw new Error("Couldn't find both players' accounts, so nothing was counted.");
+                const wd = w.data(), ld = l.data();
+                const wElo = typeof wd.elo === 'number' ? wd.elo : ELO_START;
+                const lElo = typeof ld.elo === 'number' ? ld.elo : ELO_START;
+
+                // Standard Elo: upsets move more points than expected wins
+                const expectedWin = 1 / (1 + Math.pow(10, (lElo - wElo) / 400));
+                const base = ELO_K * (1 - expectedWin);
+
+                // Beating a brand-new account is worth less (fresh accounts are how alts feed points)
+                const loserGames = (ld.wins || 0) + (ld.losses || 0);
+                const newAcctMult = loserGames < PROVISIONAL_GAMES ? PROVISIONAL_MULT : 1;
+
+                const mult = pairMult * newAcctMult;
+                const rated = pairMult > 0;
+                const delta = rated ? Math.max(1, Math.round(base * mult)) : 0;
+                const newWinElo = wElo + delta;
+                const newLoseElo = Math.max(0, lElo - delta);
+
+                if (rated) {
+                    tx.update(winRef, { wins: (wd.wins || 0) + 1, streak: (wd.streak || 0) + 1, elo: newWinElo });
+                    tx.update(loseRef, { losses: (ld.losses || 0) + 1, streak: 0, elo: newLoseElo });
+                }
+                // Always log the result so repeat pairings keep counting toward the weekly cap
+                tx.set(db.collection('match_results').doc(), {
+                    pairKey: pairKey,
+                    winnerUid: winner.uid,
+                    loserUid: loser.uid,
+                    winnerGt: winner.gt,
+                    loserGt: loser.gt,
+                    score: `${Math.max(myScore, oppScore)}-${Math.min(myScore, oppScore)}`,
+                    rated: rated,
+                    delta: delta,
+                    multiplier: mult,
+                    timestamp: firebase.firestore.FieldValue.serverTimestamp()
+                });
+                tx.delete(oppDoc.ref);
+                Object.assign(out, { delta, newWinElo, newLoseElo, rated, mult, newAcctMult });
+            });
+
+            // Tell admins when the same two players keep meeting (non-fatal if this write fails)
+            if (recent >= FLAG_PAIR_AT) {
+                try {
+                    await db.collection('reports').add({
+                        type: 'Suspicious Pairing - Repeat Opponents',
+                        player1: me.gt, player1Uid: me.uid,
+                        player2: them.gt, player2Uid: them.uid,
+                        matchesThisWeek: recent + 1,
+                        timestamp: firebase.firestore.FieldValue.serverTimestamp()
+                    });
+                } catch (e) { console.error("Couldn't flag pairing:", e); }
+            }
+
+            if (!out.rated) {
+                alert(`Both players reported matching scores, but you two have already played ${recent} rated matches in the last ${PAIR_WINDOW_DAYS} days. This one doesn't count toward Elo. Play someone else to climb!`);
+            } else {
+                let note = "";
+                if (out.mult < 1) note = out.newAcctMult < 1 && pairMult === 1 ? " (reduced: opponent is a new account)" : " (reduced: repeat opponent this week)";
+                alert(`Both players reported matching scores! ${winner.gt} +${out.delta} Elo (${out.newWinElo}), ${loser.gt} -${out.delta} Elo (${out.newLoseElo}).${note}`);
             }
         }
     </script>

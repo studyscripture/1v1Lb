@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>1v1LB.com - BO2 Ranks</title>
+    <!-- Firebase V8 SDKs -->
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-firestore.js"></script>
+
+    <style>
+        /* 1v1LB Authentic Dark Theme */
+        :root {
+            --bg-body: #111111;
+            --bg-panel: #1c1c1c;
+            --bg-header: #0d0d0d;
+            --accent: #ff9900;
+            --text-main: #cccccc;
+            --text-light: #ffffff;
+            --border: #333333;
+        }
+
+        body { font-family: 'Segoe UI', Arial, sans-serif; background-color: var(--bg-body); color: var(--text-main); margin: 0; }
+        
+        /* Header & Nav */
+        header { background-color: var(--bg-header); border-bottom: 2px solid var(--accent); padding: 20px; text-align: center; }
+        header h1 { margin: 0; color: var(--text-light); font-size: 2.5rem; letter-spacing: 2px; }
+        header h1 span { color: var(--accent); }
+        
+        nav { display: flex; justify-content: center; background: #000; padding: 10px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+        nav button { background: none; border: none; color: var(--text-main); font-size: 16px; margin: 5px 15px; cursor: pointer; text-transform: uppercase; font-weight: bold; }
+        nav button:hover, nav button.active { color: var(--accent); }
+
+        .container { max-width: 1000px; margin: 20px auto; padding: 20px; }
+        
+        /* User Bar */
+        #user-bar { background: var(--bg-panel); padding: 10px 20px; margin-bottom: 20px; display: flex; justify-content: space-between; border-left: 4px solid var(--accent); }
+        
+        /* Tabs */
+        .tab { display: none; background: var(--bg-panel); padding: 20px; border: 1px solid var(--border); }
+        .tab.active { display: block; }
+        
+        /* Tables */
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 14px; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid var(--border); }
+        th { background-color: var(--bg-header); color: var(--accent); text-transform: uppercase; font-size: 13px; }
+        tr:hover { background-color: #252525; }
+
+        /* Buttons & Forms */
+        .btn { background-color: var(--accent); color: #000; border: none; padding: 10px 15px; cursor: pointer; font-weight: bold; text-transform: uppercase; font-size: 12px; }
+        .btn:hover { background-color: #e68a00; }
+        .btn-red { background-color: #cc0000; color: white; }
+        
+        input, select { width: 100%; padding: 10px; margin: 5px 0; background: var(--bg-body); border: 1px solid var(--border); color: white; box-sizing: border-box; }
+        label { font-size: 12px; color: var(--accent); text-transform: uppercase; font-weight: bold; }
+        
+        .box-split { display: flex; gap: 20px; flex-wrap: wrap; }
+        .box-half { flex: 1; min-width: 300px; }
+        
+        .grid-inputs { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; margin-top: 10px; }
+        .map-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-top: 15px; padding-top: 15px; border-top: 1px dashed var(--border); }
+
+        h2 { border-bottom: 1px solid var(--border); padding-bottom: 10px; margin-top: 0; color: var(--text-light); }
+        h3 { color: var(--accent); margin-top: 25px; border-bottom: 1px dashed var(--border); padding-bottom: 5px; }
+        ul { line-height: 1.6; }
+        .rule-sub { margin-left: 20px; font-size: 0.9em; color: #aaa; }
+        
+        .streak-fire { color: #ff5722; font-weight: bold; }
+    </style>
+</head>
+<body onload="updateMapSelectors()">
+
+    <header>
+        <h1>1v1<span>LB</span></h1>
+        <p style="margin:5px 0 0; color:var(--accent);">Black Ops 2 - Competitive Rankings</p>
+    </header>
+
+    <nav>
+        <button class="active" onclick="showTab('leaderboard')">Leaderboard</button>
+        <button onclick="showTab('matchfinder')">Match Finder</button>
+        <button onclick="showTab('report')">Report / Dispute</button>
+        <button onclick="showTab('rules')">Rules</button>
+    </nav>
+
+    <div class="container">
+        <!-- Auth Bar -->
+        <div id="user-bar">
+            <span id="user-info">Not logged in. Log in to post matches and report scores.</span>
+            <button id="auth-btn" class="btn" onclick="showTab('auth')">Login / Register</button>
+        </div>
+
+        <!-- AUTH TAB -->
+        <div id="auth" class="tab">
+            <h2>Authentication</h2>
+            <div class="box-split">
+                <div class="box-half">
+                    <h3>Log In</h3>
+                    <input type="email" id="login-email" placeholder="Email">
+                    <input type="password" id="login-pass" placeholder="Password">
+                    <button class="btn" onclick="login()" style="margin-top:10px;">Log In</button>
+                </div>
+                <div class="box-half">
+                    <h3>Register</h3>
+                    <input type="text" id="reg-gt" placeholder="Xbox/PSN Gamertag (Exact)">
+                    <input type="email" id="reg-email" placeholder="Email">
+                    <input type="password" id="reg-pass" placeholder="Password">
+                    <button class="btn" onclick="register()" style="margin-top:10px;">Create Account</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- LEADERBOARD TAB -->
+        <div id="leaderboard" class="tab active">
+            <h2>Global Rankings</h2>
+            <table>
+                <thead><tr>
+                    <th>Rank</th>
+                    <th>Gamertag</th>
+                    <th>Wins</th>
+                    <th>Losses</th>
+                    <th>W/L Ratio</th>
+                    <th>Streak</th>
+                </tr></thead>
+                <tbody id="lb-body">
+                    <tr><td colspan="6">Loading rankings...</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- MATCH FINDER TAB -->
+        <div id="matchfinder" class="tab">
+            <h2>Match Finder</h2>
+            <div style="background: #2a2a2a; padding: 20px; margin-bottom: 20px; border-left: 3px solid var(--accent);">
+                <label style="font-size: 16px;">Post a Challenge</label>
+                
+                <div class="grid-inputs">
+                    <div>
+                        <label>Console</label>
+                        <select id="match-console">
+                            <option>Xbox</option>
+                            <option>PS4/PS5</option>
+                            <option>PC / Plutonium</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label>Rules / Playstyle</label>
+                        <select id="match-rules">
+                            <option>Spawntrap</option>
+                            <option>Groundgame (FFA)</option>
+                            <option>Groundgame (Hardpoint)</option>
+                            <option>Groundgame (Domination)</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label>Series Length</label>
+                        <select id="match-series" onchange="updateMapSelectors()">
+                            <option>1 and Done</option>
+                            <option>Best of 3 (2/3)</option>
+                            <option>Best of 5 (3/5)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div id="map-selectors-container" class="map-grid"></div>
+
+                <button class="btn" style="width: 100%; margin-top: 15px;" onclick="postMatch()">Post Match to Board</button>
+            </div>
+
+            <div style="overflow-x: auto;">
+                <table>
+                    <thead><tr>
+                        <th>Host</th>
+                        <th>Console</th>
+                        <th>Series</th>
+                        <th>Maps</th>
+                        <th>Rules</th>
+                        <th>Status</th>
+                    </tr></thead>
+                    <tbody id="mf-body">
+                        <tr><td colspan="6">Loading open matches...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- REPORT TAB (UPDATED WITH AUTO-AGREEMENT) -->
+        <div id="report" class="tab">
+            <h2>Report Score / File Dispute</h2>
+            <p style="margin-bottom: 20px;">Report the exact score (e.g. 2 to 0). If your opponent reports the matching score, the leaderboard updates automatically. If scores conflict, it goes into a dispute for an admin to review.</p>
+            
+            <label>Opponent's Gamertag</label>
+            <input type="text" id="rep-opp" placeholder="Exact Gamertag">
+            
+            <label>Report Type</label>
+            <select id="rep-type" onchange="toggleReportType()">
+                <option value="score">Report Match Score</option>
+                <option value="dispute">Direct Dispute (Opponent Cheated / Fake Setup)</option>
+            </select>
+
+            <div id="score-inputs" style="display: flex; gap: 15px; margin: 10px 0;">
+                <div style="flex: 1;">
+                    <label>My Score (Maps Won)</label>
+                    <input type="number" id="rep-my-score" min="0" placeholder="e.g. 2">
+                </div>
+                <div style="flex: 1;">
+                    <label>Opponent's Score (Maps Won)</label>
+                    <input type="number" id="rep-opp-score" min="0" placeholder="e.g. 1">
+                </div>
+            </div>
+
+            <label>Video/Picture Proof Link (YouTube/Imgur)</label>
+            <input type="url" id="rep-proof" placeholder="Optional for matching scores, REQUIRED for disputes">
+
+            <button class="btn btn-red" style="margin-top: 10px;" onclick="submitReport()">Submit Report</button>
+        </div>
+
+        <!-- RULES TAB -->
+        <div id="rules" class="tab">
+            <h2>Official Black Ops 2 Rules</h2>
+            
+            <h3>1. Gametypes & Game Settings</h3>
+            <p><strong>Health & Damage (ALL Modes):</strong> 30% Health, Normal Regen, Hit Indicator On, Headshots Only: No.<br>
+            <strong>General (ALL Modes):</strong> Scorestreaks Not Allowed, Pre-Match: 15s, Pre-Round: 5s, Auto Team Balance: Off, Team Change: Allowed, Dynamic Map Elements: Yes, 3rd Person Spectating & CODcasting: Allowed, Scorestreak Delay: Off.</p>
+            
+            <ul>
+                <li><strong>Free For All</strong>
+                    <div class="rule-sub">Time Limit: Unlimited | Score Limit: 20 Points (*Spawntrapping on Nuketown has a score limit to 50 points).</div>
+                    <div class="rule-sub">Minimap: Constant | Killcam: Disabled (Enabled if Nonspawntrapping).</div>
+                </li>
+                <li><strong>Hardpoint</strong>
+                    <div class="rule-sub">Time Limit: 5 Minutes | Score Limit: Unlimited | Teams: 2</div>
+                    <div class="rule-sub">Lifetime: 45s | Capture Time: None | Locations: Linear Order | Scoring: Constant</div>
+                    <div class="rule-sub">Minimap: Constant/Normal (Challenge Option) | Killcam: Off (Enabled if Nonspawntrapping)</div>
+                    <div class="rule-sub">Spawns: Respawn Delay: None, Force Respawn: Yes, Wave/Suicide/Team Kill Penalties: None</div>
+                </li>
+                <li><strong>Domination</strong>
+                    <div class="rule-sub">Time Limit: 5 Minutes | Score Limit: Unlimited | Teams: 2</div>
+                    <div class="rule-sub">Capture Time: 5s | Round Limit: 2 | Switch Sides: Every Round</div>
+                    <div class="rule-sub">Minimap: Constant/Normal (Challenge Option) | Killcam: Off (Enabled if Nonspawntrapping)</div>
+                    <div class="rule-sub">Spawns: Respawn Delay: None, Force Respawn: Yes, Wave/Suicide/Team Kill Penalties: None</div>
+                </li>
+            </ul>
+
+            <h3>2. Class Setup</h3>
+            <ul>
+                <li><strong>Primary:</strong> Ballista or DSR50 (Fast Mag or Extended Mag)</li>
+                <li><strong>Attachments:</strong> FMJ</li>
+                <li><strong>Perk 1:</strong> Flak Jacket</li>
+                <li><strong>Perk 2:</strong> Scavenger or Fast Hands</li>
+                <li><strong>Perk 3:</strong> Extreme Conditioning or Dead Silence</li>
+                <li><strong>Deathstreak:</strong> Not Allowed</li>
+            </ul>
+
+            <h3>3. Warnings & Illegal Actions</h3>
+            <p>For each game, players can receive up to two warnings. The second warning qualifies as a disqualification. Whether a warning or DQ is called is solely up to the victim.</p>
+            <ul>
+                <li>Incorrect rules, setup, or illegal class.</li>
+                <li>Spawning out and spawning back in / Killing yourself with ammo.</li>
+                <li>Using/throwing equipment that corrupts the game (e.g. throwing a knife into a spawn to prevent a player from spawning there).</li>
+                <li><strong>NO RING AROUND THE ROSIE FOR MORE THAN 2 MINUTES.</strong></li>
+            </ul>
+
+            <h3>4. Disqualifications (DQ)</h3>
+            <p>Disqualifications must be called immediately after an illegal action has occurred or it will be invalid. You cannot call a DQ after a match has finished (unless the action couldn't be seen during the game).</p>
+            <ul>
+                <li>Killing with an illegal setup, rules, or class.</li>
+                <li>Killing a player joining/participating in the match incorrectly.</li>
+                <li>Point Glitching (Can result in DQ or a free kill for the victim player depending on their call).</li>
+                <li>Throwing Knives.</li>
+                <li>Hardscoping, hardscope jumpshots, relapse shots.</li>
+                <li>Killing a player with explosive objects (barrels, cars) is legal ONLY if the explosion was caused by a sniper shot.</li>
+                <li>Any form of cheating (Hacking/Mods, IP Flooding/DDoS, manipulating in-game mechanics/glitching, counting bullets or assistance from a non-competing player).</li>
+            </ul>
+
+            <h3>5. Settings & Disconnections</h3>
+            <ul>
+                <li><strong>Host Responsibilities:</strong> The host must ensure correct rules. If settings are wrong, the host must end the game immediately before any action occurs, or it results in a DQ for that specific game. If a player notices settings are wrong but continues playing without notifying the host, it continues as a normal game. Refusal to end a wrongly-setup match = DQ.</li>
+                <li><strong>Disconnections:</strong> Players have 5 minutes to rejoin and contact the referee/opponent, or they forfeit that game. The game resumes with the exact scores from the disconnect (Except in objective modes, where disconnecting results in an automatic loss for that game).</li>
+            </ul>
+
+            <h3>6. Reporting & Attendance</h3>
+            <ul>
+                <li>Scores must be reported within 24 hours. If one player fails to report or dispute, the reporting player automatically receives the win.</li>
+                <li>Reporting fake wins/losses without a match occurring results in suspension.</li>
+                <li>If a player fails to arrive, the other player must provide valid proof of absence to claim a forfeit win.</li>
+                <li>Players MUST use the exact in-game usernames displayed on their 1v1LB Profile.</li>
+            </ul>
+
+            <h3>7. Disputes</h3>
+            <ul>
+                <li>If no proof or details are provided in a dispute, the win goes to the player who provided proof.</li>
+                <li>If no player submits proof or details within 5 hours of the dispute, a staff member will delete the match (no win/loss awarded).</li>
+                <li><strong>Valid Proof:</strong> Clear pictures of the final scoreboard with players visibly present, video proof of the game, or observable evidence of an in-game action. Witnesses/messages do NOT count as proof.</li>
+                <li>Reporting false disputes or fake proof results in an immediate suspension from 1v1LB.</li>
+            </ul>
+        </div>
+    </div>
+
+    <script>
+        // ==========================================
+        // 1. FIREBASE CONFIGURATION (PUT YOUR KEYS HERE)
+        // ==========================================
+        const firebaseConfig = {
+            apiKey: "YOUR_API_KEY",
+            authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+            projectId: "YOUR_PROJECT_ID",
+            storageBucket: "YOUR_PROJECT_ID.appspot.com",
+            messagingSenderId: "YOUR_SENDER_ID",
+            appId: "YOUR_APP_ID"
+        };
+        
+        if (!firebase.apps.length) { firebase.initializeApp(firebaseConfig); }
+        const auth = firebase.auth();
+        const db = firebase.firestore();
+
+        let currentUser = null;
+        let currentGamertag = "";
+
+        // UI & TABS
+        function showTab(tabId) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+            document.getElementById(tabId).classList.add('active');
+            event.currentTarget.classList.add('active');
+        }
+
+        // TOGGLE REPORT UI
+        function toggleReportType() {
+            const type = document.getElementById('rep-type').value;
+            if(type === 'dispute') {
+                document.getElementById('score-inputs').style.display = 'none';
+                document.getElementById('rep-proof').placeholder = "REQUIRED for disputes (YouTube/Imgur)";
+            } else {
+                document.getElementById('score-inputs').style.display = 'flex';
+                document.getElementById('rep-proof').placeholder = "Optional for matching scores, REQUIRED for disputes";
+            }
+        }
+
+        // DYNAMIC MAP SELECTORS LOGIC
+        function updateMapSelectors() {
+            const series = document.getElementById('match-series').value;
+            const container = document.getElementById('map-selectors-container');
+            const mapOptions = `
+                <option>Nuketown 2025</option>
+                <option>Carrier</option>
+                <option>Express</option>
+                <option>Hijacked</option>
+                <option>Plaza</option>
+                <option>Raid</option>
+                <option>Slums</option>
+                <option>Standoff</option>
+                <option>Studio</option>
+            `;
+
+            let html = '';
+            let mapCount = 1;
+            if (series === 'Best of 3 (2/3)') mapCount = 3;
+            if (series === 'Best of 5 (3/5)') mapCount = 5;
+
+            for (let i = 1; i <= mapCount; i++) {
+                let label = mapCount === 1 ? 'Map' : `Map ${i}`;
+                html += `<div><label>${label}</label><select class="map-select">${mapOptions}</select></div>`;
+            }
+            container.innerHTML = html;
+        }
+
+        // AUTHENTICATION
+        auth.onAuthStateChanged(user => {
+            if (user) {
+                currentUser = user;
+                db.collection('users').doc(user.uid).get().then(doc => {
+                    if(doc.exists) {
+                        currentGamertag = doc.data().gamertag;
+                        document.getElementById('user-info').innerHTML = `Logged in as: <strong style="color:var(--accent)">${currentGamertag}</strong>`;
+                        document.getElementById('auth-btn').innerText = "Log Out";
+                        document.getElementById('auth-btn').onclick = () => auth.signOut();
+                    }
+                });
+            } else {
+                currentUser = null;
+                currentGamertag = "";
+                document.getElementById('user-info').innerText = "Not logged in. Log in to post matches and report scores.";
+                document.getElementById('auth-btn').innerText = "Login / Register";
+                document.getElementById('auth-btn').onclick = () => showTab('auth');
+            }
+        });
+
+        function register() {
+            const email = document.getElementById('reg-email').value;
+            const pass = document.getElementById('reg-pass').value;
+            const gt = document.getElementById('reg-gt').value;
+            if(!gt) return alert("Gamertag required");
+
+            auth.createUserWithEmailAndPassword(email, pass).then(cred => {
+                db.collection('users').doc(cred.user.uid).set({
+                    gamertag: gt,
+                    wins: 0,
+                    losses: 0,
+                    streak: 0 
+                }).then(() => {
+                    alert("Account Created! Welcome to 1v1LB.");
+                    showTab('leaderboard');
+                });
+            }).catch(err => alert(err.message));
+        }
+
+        function login() {
+            const email = document.getElementById('login-email').value;
+            const pass = document.getElementById('login-pass').value;
+            auth.signInWithEmailAndPassword(email, pass).then(() => {
+                showTab('leaderboard');
+            }).catch(err => alert(err.message));
+        }
+
+        // LEADERBOARD (LIVE LISTENER)
+        db.collection('users').orderBy('wins', 'desc').limit(50).onSnapshot(snapshot => {
+            const lb = document.getElementById('lb-body');
+            lb.innerHTML = "";
+            let rank = 1;
+            
+            snapshot.forEach(doc => {
+                const data = doc.data();
+                let wlRatio = "0.00";
+                if (data.losses === 0 && data.wins > 0) wlRatio = data.wins.toFixed(2);
+                else if (data.wins > 0 || data.losses > 0) wlRatio = (data.wins / data.losses).toFixed(2);
+
+                let currentStreak = data.streak || 0;
+                let streakDisplay = currentStreak >= 3 ? `<span class="streak-fire">🔥 ${currentStreak}</span>` : currentStreak;
+
+                lb.innerHTML += `<tr>
+                    <td>#${rank}</td>
+                    <td style="color:var(--accent); font-weight:bold;">${data.gamertag}</td>
+                    <td style="color:#00e676;">${data.wins}</td>
+                    <td style="color:#ff1744;">${data.losses}</td>
+                    <td>${wlRatio}</td>
+                    <td>${streakDisplay}</td>
+                </tr>`;
+                rank++;
+            });
+        });
+
+        // MATCH FINDER (LIVE LISTENER)
+        db.collection('matches').orderBy('createdAt', 'desc').onSnapshot(snapshot => {
+            const mf = document.getElementById('mf-body');
+            mf.innerHTML = "";
+            snapshot.forEach(doc => {
+                const data = doc.data();
+                mf.innerHTML += `<tr>
+                    <td style="color:var(--accent); font-weight:bold;">${data.host}</td>
+                    <td>${data.console}</td>
+                    <td>${data.series}</td>
+                    <td style="max-width: 200px; line-height: 1.4;">${data.maps}</td>
+                    <td>${data.rules}</td>
+                    <td><button class="btn" onclick="alert('Message them on ${data.console} to start!')">Accept</button></td>
+                </tr>`;
+            });
+        });
+
+        function postMatch() {
+            if(!currentUser) return alert("You must be logged in to post a match.");
+            const cons = document.getElementById('match-console').value;
+            const rules = document.getElementById('match-rules').value;
+            const series = document.getElementById('match-series').value;
+            
+            const mapSelects = document.querySelectorAll('.map-select');
+            let mapsArr = [];
+            mapSelects.forEach(select => mapsArr.push(select.value));
+            
+            db.collection('matches').add({
+                host: currentGamertag,
+                console: cons,
+                rules: rules,
+                series: series,
+                maps: mapsArr.join(' / '),
+                createdAt: firebase.firestore.FieldValue.serverTimestamp()
+            }).then(() => {
+                alert("Match posted to the board!");
+            });
+        }
+
+        // ==========================================
+        // SMART REPORTING / AUTO-AGREEMENT LOGIC
+        // ==========================================
+        async function submitReport() {
+            if(!currentUser) return alert("You must be logged in to report a score.");
+            
+            const opp = document.getElementById('rep-opp').value;
+            if(opp.toLowerCase() === currentGamertag.toLowerCase()) return alert("You cannot report a match against yourself.");
+            
+            const type = document.getElementById('rep-type').value;
+            const proof = document.getElementById('rep-proof').value;
+
+            // Handle Direct Dispute
+            if(type === 'dispute') {
+                if(!proof) return alert("You MUST provide a video/picture proof link to file a direct dispute.");
+                await db.collection('reports').add({
+                    type: 'Direct Dispute',
+                    submitter: currentGamertag,
+                    opponent: opp,
+                    proof: proof,
+                    timestamp: firebase.firestore.FieldValue.serverTimestamp()
+                });
+                alert("Dispute submitted. An Admin will review the evidence.");
+                return;
+            }
+
+            // Handle Standard Score Report
+            const myScore = parseInt(document.getElementById('rep-my-score').value);
+            const oppScore = parseInt(document.getElementById('rep-opp-score').value);
+            
+            if(isNaN(myScore) || isNaN(oppScore)) return alert("Please enter valid numbers for the scores.");
+            if(myScore === oppScore) return alert("Matches cannot end in a tie.");
+
+            // Check if Opponent has already submitted a pending report against you
+            const pendingQuery = await db.collection('pending_reports')
+                .where('reporter', '==', opp)
+                .where('opponent', '==', currentGamertag)
+                .get();
+
+            if (pendingQuery.empty) {
+                // No report from opponent yet, save to pending
+                await db.collection('pending_reports').add({
+                    reporter: currentGamertag,
+                    opponent: opp,
+                    myScore: myScore,
+                    oppScore: oppScore,
+                    timestamp: firebase.firestore.FieldValue.serverTimestamp()
+                });
+                alert("Score reported! Waiting for your opponent to report their score. Once they confirm, the Leaderboard will update.");
+            } else {
+                // Opponent has reported! Compare the scores.
+                const oppDoc = pendingQuery.docs[0];
+                const oppData = oppDoc.data();
+
+                // Do they agree? (My score = Their Opponent Score AND Their Score = My Opponent Score)
+                if (myScore === oppData.oppScore && oppScore === oppData.myScore) {
+                    
+                    // Scores Match! Auto-Update the Leaderboard.
+                    const iWon = myScore > oppScore;
+                    const winnerGt = iWon ? currentGamertag : opp;
+                    const loserGt = iWon ? opp : currentGamertag;
+
+                    const winnerRef = db.collection('users').where('gamertag', '==', winnerGt);
+                    const loserRef = db.collection('users').where('gamertag', '==', loserGt);
+
+                    const winSnap = await winnerRef.get();
+                    const loseSnap = await loserRef.get();
+
+                    // Update Winner
+                    if(!winSnap.empty) {
+                        await winSnap.docs[0].ref.update({
+                            wins: firebase.firestore.FieldValue.increment(1),
+                            streak: firebase.firestore.FieldValue.increment(1)
+                        });
+                    }
+                    // Update Loser
+                    if(!loseSnap.empty) {
+                        await loseSnap.docs[0].ref.update({
+                            losses: firebase.firestore.FieldValue.increment(1),
+                            streak: 0
+                        });
+                    }
+
+                    // Delete the pending report since it is resolved
+                    await oppDoc.ref.delete();
+                    alert("Both players reported matching scores! Leaderboard has been updated successfully.");
+                } else {
+                    // Scores DO NOT Match! Push to Dispute Reports for Admins.
+                    await db.collection('reports').add({
+                        type: 'Conflicting Scores Dispute',
+                        player1: currentGamertag,
+                        p1_claims_my_score: myScore,
+                        p1_claims_opp_score: oppScore,
+                        player2: opp,
+                        p2_claims_my_score: oppData.myScore,
+                        p2_claims_opp_score: oppData.oppScore,
+                        timestamp: firebase.firestore.FieldValue.serverTimestamp()
+                    });
+
+                    // Delete pending report so it doesn't get stuck
+                    await oppDoc.ref.delete();
+                    alert("CONFLICT! You and your opponent reported different scores. This match has been locked and sent to an Admin for review.");
+                }
+            }
+        }
+    </script>
+</body>
+</html>

@@ -94,6 +94,7 @@
     <nav>
         <button class="active" data-tab="leaderboard" onclick="showTab('leaderboard')">Leaderboard</button>
         <button data-tab="matchfinder" onclick="showTab('matchfinder')">Match Finder</button>
+        <button data-tab="active" onclick="showTab('active')">Active Matches</button>
         <button data-tab="report" onclick="showTab('report')">Report / Dispute</button>
         <button data-tab="rules" onclick="showTab('rules')">Rules</button>
     </nav>
@@ -126,7 +127,7 @@
                 </div>
                 <div class="box-half">
                     <h3>Register</h3>
-                    <input type="text" id="reg-gt" placeholder="PSN ID (optional, can add later)" maxlength="24">
+                    <input type="text" id="reg-gt" placeholder="Username / PSN ID (optional, can add later)" maxlength="24">
                     <input type="email" id="reg-email" placeholder="Email">
                     <input type="password" id="reg-pass" placeholder="Password">
                     <button class="btn" onclick="register()" style="margin-top:10px;">Create Account</button>
@@ -207,6 +208,28 @@
                     </tr></thead>
                     <tbody id="mf-body">
                         <tr><td colspan="6">Loading open matches...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- ACTIVE MATCHES TAB -->
+        <div id="active" class="tab">
+            <h2>Active Matches</h2>
+            <p style="margin-bottom:10px;">Matches that have been accepted. The maps and ruleset below are what both players agreed to when the match was accepted. Play it, then report the score.</p>
+            <div style="overflow-x: auto;">
+                <table>
+                    <thead><tr>
+                        <th>Opponent</th>
+                        <th>Maps</th>
+                        <th>Ruleset</th>
+                        <th>Series</th>
+                        <th>Console</th>
+                        <th>Accepted</th>
+                        <th></th>
+                    </tr></thead>
+                    <tbody id="active-body">
+                        <tr><td colspan="7">Log in to see your active matches.</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -357,6 +380,8 @@
         const PAIR_WINDOW_DAYS = 7;                 // how far back "repeat opponent" looks
         const PAIR_MULTIPLIERS = [1, 1, 0.5, 0.25]; // Elo multiplier for the 1st, 2nd, 3rd, 4th meeting in the window; 5th+ is unrated
         const FLAG_PAIR_AT = 3;                     // flag the pairing for admins after this many earlier meetings
+        const MAX_OPEN_POSTS = 3;                   // open match posts per person (the Firestore rules enforce 3 as well)
+        const ACTIVE_VIEW_HOURS = 72;               // accepted matches stay on the Active tab this long unless the score is reported
         const PROVISIONAL_GAMES = 5;                // opponents with fewer games than this count as "new"
         const PROVISIONAL_MULT = 0.5;               // beating a brand-new account is worth half
         const DISPOSABLE_DOMAINS = [
@@ -472,6 +497,7 @@
         let registering = false;
         let playersCache = [];
         let matchesCache = [];
+        let activeCache = [];
         const gt = () => (profile && profile.gamertag) || '';
 
         // ==========================================
@@ -484,7 +510,7 @@
                 return false;
             }
             if (!gt()) {
-                alert("Set your PSN first using the Set PSN button in the top bar." + (profileLoaded ? "" : " (Your profile is still loading, try again in a second.)"));
+                alert("Set your username first using the Set username button in the top bar." + (profileLoaded ? "" : " (Your profile is still loading, try again in a second.)"));
                 return false;
             }
             return true;
@@ -522,6 +548,7 @@
             const btn = $('auth-btn');
             if (!currentUser) {
                 $('user-info').textContent = "Not logged in. Log in to post matches and report scores.";
+                btn.style.display = '';
                 btn.innerText = "Login / Register";
                 btn.onclick = () => showTab('auth');
                 return;
@@ -529,16 +556,15 @@
             const name = gt();
             if (name) {
                 $('user-info').innerHTML = `Logged in as: <strong style="color:var(--accent)">${esc(name)}</strong>
-                    <button class="btn" style="margin-left:10px; padding:4px 8px;" onclick="changePsn()">Change PSN</button>`;
+                    <button class="btn" style="margin-left:10px; padding:4px 8px;" onclick="changePsn()">Change username</button>`;
             } else if (profileLoaded) {
                 $('user-info').innerHTML = `Logged in as: <strong style="color:var(--accent)">${esc(currentUser.email)}</strong>
-                    <span style="color:#888">(no PSN set)</span>
-                    <button class="btn" style="margin-left:10px; padding:4px 8px;" onclick="changePsn()">Set PSN</button>`;
+                    <span style="color:#888">(no username set)</span>
+                    <button class="btn" style="margin-left:10px; padding:4px 8px;" onclick="changePsn()">Set username</button>`;
             } else {
                 $('user-info').innerHTML = `Logged in as: <strong style="color:var(--accent)">${esc(currentUser.displayName || currentUser.email)}</strong> <span style="color:#888">(loading...)</span>`;
             }
-            btn.innerText = "Log Out";
-            btn.onclick = () => auth.signOut();
+            btn.style.display = 'none'; // no log out button: you stay signed in
         }
 
         // Stats a profile needs. Only fills what's missing, so nothing is ever reset.
@@ -574,13 +600,13 @@
         async function changePsn() {
             if (!currentUser) return;
             const had = !!gt();
-            const input = prompt(had ? `Enter your new PSN ID (currently "${gt()}"):` : "Enter your PSN ID:");
+            const input = prompt(had ? `Enter your new username (your PSN ID). Currently "${gt()}":` : "Enter your username (your PSN ID):");
             if (input === null) return;
             const name = input.trim();
             if (!name || name === gt()) return;
-            if (name.length > 24) return alert("PSN is too long (24 characters max).");
+            if (name.length > 24) return alert("Username is too long (24 characters max).");
             try {
-                if (await gamertagTaken(name, currentUser.uid)) return alert("That PSN is already taken.");
+                if (await gamertagTaken(name, currentUser.uid)) return alert("That username is already taken.");
                 const ref = db.collection('users').doc(currentUser.uid);
                 const snap = await withTimeout(ref.get());
                 const existing = snap.exists ? snap.data() : {};
@@ -591,10 +617,10 @@
                     ...statDefaults(existing)
                 }, { merge: true }));
                 try { await currentUser.updateProfile({ displayName: name }); } catch (e) { console.error(e); }
-                alert(had ? "PSN updated." : "PSN saved.");
+                alert(had ? "Username updated." : "Username saved.");
             } catch (e) {
                 console.error(e);
-                alert("Couldn't save your PSN. " + describe(e));
+                alert("Couldn't save your username. " + describe(e));
             }
         }
 
@@ -725,17 +751,20 @@
         // ==========================================
         // 8. LIVE LISTS (leaderboard + match finder)
         // ==========================================
-        let lbUnsub = null, mfUnsub = null;
+        let lbUnsub = null, mfUnsub = null, actUnsub = null;
         function restartDataListeners() {
             if (lbUnsub) { lbUnsub(); lbUnsub = null; }
             if (mfUnsub) { mfUnsub(); mfUnsub = null; }
+            if (actUnsub) { actUnsub(); actUnsub = null; }
             lbUnsub = startLeaderboard();
             mfUnsub = startMatchFinder();
+            actUnsub = startActive();
         }
 
         function startLeaderboard() {
             return db.collection('users').onSnapshot(snapshot => {
                 playersCache = snapshot.docs.map(d => ({ uid: d.id, ...d.data() }));
+                refreshMatches();
                 const players = playersCache
                     .filter(p => p.gamertag)
                     .map(x => ({ ...x, elo: typeof x.elo === 'number' ? x.elo : ELO_START, wins: x.wins || 0, losses: x.losses || 0 }));
@@ -764,29 +793,43 @@
             });
         }
 
+        // Current username for a player (so a name change shows up on their old posts too)
+        function liveName(uid, fallback) {
+            const p = playersCache.find(x => x.uid === uid);
+            return (p && p.gamertag) || fallback;
+        }
+        // Your post. Older posts that have no hostUid are matched by name.
+        function isMine(m) {
+            return !!currentUser && (m.hostUid === currentUser.uid || (!m.hostUid && !!gt() && m.host === gt()));
+        }
+        function refreshMatches() { renderMatchBoard(); renderMyMatches(); renderActive(); renderNotices(); }
+
+        function renderMatchBoard() {
+            // The public board only shows matches nobody has accepted yet
+            const open = matchesCache.filter(m => !m.acceptedByUid);
+            let html = "";
+            open.forEach(m => {
+                html += `<tr>
+                    <td style="color:var(--accent); font-weight:bold;">${esc(liveName(m.hostUid, m.host))}</td>
+                    <td>${esc(m.console)}</td>
+                    <td>${esc(m.series)}</td>
+                    <td style="max-width:200px; line-height:1.4;">${esc(m.maps)}</td>
+                    <td>${esc(m.rules)}</td>
+                    <td>${isMine(m)
+                        ? `<button class="btn btn-red" onclick="removeMatch('${esc(m.id)}')">Cancel</button>`
+                        : `<button class="btn" onclick="acceptMatch('${esc(m.id)}')">Accept</button>`}</td>
+                </tr>`;
+            });
+            $('mf-body').innerHTML = html || '<tr><td colspan="6">No open matches right now.</td></tr>';
+        }
+
         function startMatchFinder() {
             return db.collection('matches').onSnapshot(snapshot => {
                 matchesCache = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
                 const ms = d => (d.createdAt && d.createdAt.toMillis) ? d.createdAt.toMillis() : Date.now(); // pending writes have no timestamp yet
                 matchesCache.sort((a, b) => ms(b) - ms(a));
 
-                // The public board only shows matches nobody has accepted yet
-                const open = matchesCache.filter(m => !m.acceptedByUid);
-                let html = "";
-                open.forEach(m => {
-                    const mine = currentUser && m.hostUid === currentUser.uid;
-                    html += `<tr>
-                        <td style="color:var(--accent); font-weight:bold;">${esc(m.host)}</td>
-                        <td>${esc(m.console)}</td>
-                        <td>${esc(m.series)}</td>
-                        <td style="max-width:200px; line-height:1.4;">${esc(m.maps)}</td>
-                        <td>${esc(m.rules)}</td>
-                        <td>${mine
-                            ? `<button class="btn btn-red" onclick="removeMatch('${esc(m.id)}')">Delete</button>`
-                            : `<button class="btn" onclick="acceptMatch('${esc(m.id)}')">Accept</button>`}</td>
-                    </tr>`;
-                });
-                $('mf-body').innerHTML = html || '<tr><td colspan="6">No open matches right now.</td></tr>';
+                renderMatchBoard();
                 renderMyMatches();
                 renderNotices();
             }, err => {
@@ -795,38 +838,68 @@
             });
         }
 
-        // Your own matches: waiting ones (can delete) and accepted ones (shows who you're playing)
+        // Your open posts. You can cancel them until someone accepts.
         function renderMyMatches() {
             const box = $('my-matches');
             if (!currentUser) { box.innerHTML = ''; return; }
-            const recent = m => { const t = m.acceptedAt; return !t || !t.toMillis || (Date.now() - t.toMillis()) < 48 * 3600000; };
-            const mine = matchesCache.filter(m =>
-                (m.hostUid === currentUser.uid && (!m.acceptedByUid || recent(m))) ||
-                (m.acceptedByUid === currentUser.uid && recent(m)));
+            const mine = matchesCache.filter(m => isMine(m) && !m.acceptedByUid);
             if (!mine.length) { box.innerHTML = ''; return; }
-            let html = '<div class="my-matches"><h3>Your Matches</h3>';
+            let html = `<div class="my-matches"><h3>Your Open Matches (${mine.length}/${MAX_OPEN_POSTS})</h3>`;
             mine.forEach(m => {
-                const detail = `${esc(m.series)} on ${esc(m.console)} (${esc(m.maps)})`;
-                if (!m.acceptedByUid) {
-                    html += `<div class="row"><span>Waiting for an opponent: ${detail}</span>
-                        <button class="btn btn-red btn-small" onclick="removeMatch('${esc(m.id)}')">Delete</button></div>`;
-                } else {
-                    const iHost = m.hostUid === currentUser.uid;
-                    const opp = iHost ? m.acceptedBy : m.host;
-                    html += `<div class="row"><span><b style="color:#00e676">Accepted:</b> you vs <b style="color:var(--accent)">${esc(opp)}</b>, ${detail}. Message them on ${esc(m.console)} to start.</span>
-                        <button class="btn btn-small" onclick="goReport('${esc(opp).replace(/'/g, '')}')">Report score</button></div>`;
-                }
+                html += `<div class="row"><span>Waiting for an opponent: ${esc(m.series)} on ${esc(m.console)}, ${esc(m.rules)} (${esc(m.maps)})</span>
+                    <button class="btn btn-red btn-small" onclick="removeMatch('${esc(m.id)}')">Cancel match</button></div>`;
             });
             box.innerHTML = html + '</div>';
+        }
+
+        // ---- Active (accepted) matches ----
+        const tsMs = t => (t && t.toMillis) ? t.toMillis() : Date.now(); // a just-written timestamp is null until the server answers
+        function activeVisible(m) {
+            return !m.completed && (Date.now() - tsMs(m.acceptedAt)) < ACTIVE_VIEW_HOURS * 3600000;
+        }
+
+        function startActive() {
+            if (!currentUser) { activeCache = []; renderActive(); renderNotices(); return null; }
+            return db.collection('active_matches').where('players', 'array-contains', currentUser.uid).onSnapshot(snap => {
+                activeCache = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+                renderActive();
+                renderNotices();
+            }, err => {
+                console.error("Active matches error:", err);
+                $('active-body').innerHTML = `<tr><td colspan="7" style="color:#ff1744">Couldn't load active matches. ${esc(describe(err))}</td></tr>`;
+            });
+        }
+
+        function renderActive() {
+            const body = $('active-body');
+            if (!currentUser) { body.innerHTML = '<tr><td colspan="7">Log in to see your active matches.</td></tr>'; return; }
+            const rows = activeCache.filter(activeVisible).sort((a, b) => tsMs(b.acceptedAt) - tsMs(a.acceptedAt));
+            let html = '';
+            rows.forEach(m => {
+                const iHost = m.hostUid === currentUser.uid;
+                const opp = iHost ? liveName(m.acceptedByUid, m.acceptedBy) : liveName(m.hostUid, m.host);
+                const parts = String(m.maps || '').split(' / ');
+                const maps = parts.map((x, i) => esc(parts.length > 1 ? `Map ${i + 1}: ${x}` : x)).join('<br>');
+                html += `<tr>
+                    <td style="color:var(--accent); font-weight:bold;">${esc(opp)}</td>
+                    <td style="line-height:1.5;">${maps}</td>
+                    <td>${esc(m.rules)}</td>
+                    <td>${esc(m.series)}</td>
+                    <td>${esc(m.console)}</td>
+                    <td style="font-size:12px; color:#aaa;">${m.acceptedAt && m.acceptedAt.toMillis ? esc(new Date(m.acceptedAt.toMillis()).toLocaleString()) : 'just now'}</td>
+                    <td><button class="btn btn-small" onclick="goReport('${esc(opp)}')">Report score</button></td>
+                </tr>`;
+            });
+            body.innerHTML = html || '<tr><td colspan="7">No active matches. Accept one from the Match Finder, or wait for someone to accept yours.</td></tr>';
         }
 
         // Banner on every tab when someone accepts a match you posted
         function renderNotices() {
             const box = $('notice');
             if (!currentUser) { box.innerHTML = ''; return; }
-            const fresh = matchesCache.filter(m => m.hostUid === currentUser.uid && m.acceptedByUid && m.hostSeen === false);
+            const fresh = activeCache.filter(m => m.hostUid === currentUser.uid && m.hostSeen === false);
             box.innerHTML = fresh.map(m => `<div class="note">
-                <span><b>${esc(m.acceptedBy)}</b> accepted your ${esc(m.series)} match on ${esc(m.console)} (${esc(m.maps)}). Message them on ${esc(m.console)} to start!</span>
+                <span><b>${esc(liveName(m.acceptedByUid, m.acceptedBy))}</b> accepted your ${esc(m.series)} match on ${esc(m.console)} (${esc(m.rules)}, ${esc(m.maps)}). Message them on ${esc(m.console)} to start! See the Active Matches tab.</span>
                 <button class="btn btn-small" onclick="dismissNotice('${esc(m.id)}')">Got it</button>
             </div>`).join('');
             const base = document.title.replace(/^\(\d+\) /, '');
@@ -834,7 +907,7 @@
         }
 
         async function dismissNotice(matchId) {
-            try { await withTimeout(db.collection('matches').doc(matchId).update({ hostSeen: true })); }
+            try { await withTimeout(db.collection('active_matches').doc(matchId).update({ hostSeen: true })); }
             catch (e) { console.error(e); alert("Couldn't dismiss that. " + describe(e)); }
         }
 
@@ -846,12 +919,24 @@
         // ==========================================
         // 9. MATCH FINDER ACTIONS
         // ==========================================
+        // Each person gets 3 post "slots" (their uid + _1, _2, _3). That is how the Firestore rules enforce the limit of 3.
         async function postMatch() {
             if (!requireReady('post a match')) return;
+            const openMine = matchesCache.filter(m => isMine(m) && !m.acceptedByUid);
+            if (openMine.length >= MAX_OPEN_POSTS) {
+                return alert(`You already have ${MAX_OPEN_POSTS} open matches. Cancel one or wait for someone to accept before posting another.`);
+            }
+            const taken = new Set(matchesCache.map(m => m.id));
+            let slotId = null;
+            for (let n = 1; n <= MAX_OPEN_POSTS; n++) {
+                if (!taken.has(`${currentUser.uid}_${n}`)) { slotId = `${currentUser.uid}_${n}`; break; }
+            }
+            if (!slotId) return alert(`You already have ${MAX_OPEN_POSTS} open matches. Cancel one first.`);
+
             const maps = [];
             document.querySelectorAll('.map-select').forEach(s => maps.push(s.value));
             try {
-                await withTimeout(db.collection('matches').add({
+                await withTimeout(db.collection('matches').doc(slotId).set({
                     host: gt(),
                     hostUid: currentUser.uid,
                     console: $('match-console').value,
@@ -860,29 +945,43 @@
                     maps: maps.join(' / '),
                     createdAt: TS()
                 }));
-                alert("Match posted to the board! You'll get a notice here when someone accepts it. You can delete it until then.");
+                alert("Match posted to the board! You'll get a notice when someone accepts it. You can cancel it until then.");
             } catch (e) {
                 console.error(e);
-                alert("Your match was NOT saved. " + describe(e));
+                alert(e && e.code === 'permission-denied'
+                    ? "Your match was NOT saved. You may already have 3 open matches, or the Firestore rules need updating (see firestore.rules)."
+                    : "Your match was NOT saved. " + describe(e));
             }
         }
 
-        // Accepting is a transaction so two people can't both accept the same match
+        // Accepting moves the post into active_matches (with the agreed maps and ruleset) in one transaction,
+        // so two people can't both accept it and it can no longer be cancelled.
         async function acceptMatch(matchId) {
             if (!requireReady('accept a match')) return;
             const ref = db.collection('matches').doc(matchId);
+            const activeRef = db.collection('active_matches').doc(matchId);
             try {
                 let info = null;
                 await withTimeout(db.runTransaction(async tx => {
                     const snap = await tx.get(ref);
-                    if (!snap.exists) throw new Error("This match is no longer available.");
+                    if (!snap.exists) throw new Error("This match is no longer available. The host may have cancelled it, or someone else accepted it.");
                     const d = snap.data();
                     if (d.acceptedByUid) throw new Error("Someone else already accepted this match.");
-                    if (d.hostUid === currentUser.uid || d.host === gt()) throw new Error("You can't accept your own match.");
-                    tx.update(ref, { acceptedBy: gt(), acceptedByUid: currentUser.uid, acceptedAt: TS(), hostSeen: false });
+                    const hostUid = d.hostUid || ((playersCache.find(p => p.gamertag === d.host) || {}).uid);
+                    if (!hostUid) throw new Error("Couldn't identify the host of this older post. Ask them to cancel and repost it.");
+                    if (hostUid === currentUser.uid || d.host === gt()) throw new Error("You can't accept your own match.");
+                    tx.set(activeRef, {
+                        host: d.host, hostUid: hostUid,
+                        acceptedBy: gt(), acceptedByUid: currentUser.uid,
+                        players: [hostUid, currentUser.uid],
+                        console: d.console, rules: d.rules, series: d.series, maps: d.maps,
+                        acceptedAt: TS(), hostSeen: false, completed: false
+                    });
+                    tx.delete(ref);
                     info = d;
                 }), 15000);
-                alert(`Match accepted! ${info.host} has been notified. Message them on ${info.console} to start!`);
+                alert(`Match accepted! ${info.host} has been notified.\n\nMaps: ${info.maps}\nRuleset: ${info.rules}\n\nMessage them on ${info.console} to start. It's now on your Active Matches tab.`);
+                showTab('active');
             } catch (e) {
                 console.error(e);
                 alert("Couldn't accept this match. " + describe(e));
@@ -893,14 +992,14 @@
         async function removeMatch(matchId) {
             if (!currentUser) return;
             const m = matchesCache.find(x => x.id === matchId);
-            if (m && m.acceptedByUid) return alert("Someone already accepted this match, so it can't be deleted.");
-            if (!confirm("Delete your match from the board?")) return;
+            if (!m) return alert("This match is no longer on the board. If someone accepted it, it can't be cancelled.");
+            if (!confirm("Cancel your match and remove it from the board?")) return;
             try { await withTimeout(db.collection('matches').doc(matchId).delete()); }
             catch (e) {
                 console.error(e);
                 alert(e && e.code === 'permission-denied'
-                    ? "Couldn't delete it. Someone may have just accepted it, or the Firestore rules need updating (see firestore.rules)."
-                    : "Couldn't delete the match. " + describe(e));
+                    ? "Couldn't cancel it. Someone may have just accepted it, or the Firestore rules need updating (see firestore.rules)."
+                    : "Couldn't cancel the match. " + describe(e));
             }
         }
 
@@ -1029,6 +1128,14 @@
                 tx.delete(oppDoc.ref);
                 Object.assign(out, { delta, newWinElo, newLoseElo, rated, mult, newAcctMult });
             }), 15000);
+
+            // Take the match off the Active tab now that its score has been agreed
+            try {
+                const done = activeCache
+                    .filter(m => !m.completed && (m.players || []).includes(me.uid) && (m.players || []).includes(them.uid))
+                    .sort((a, b) => tsMs(a.acceptedAt) - tsMs(b.acceptedAt))[0];
+                if (done) await withTimeout(db.collection('active_matches').doc(done.id).update({ completed: true, completedAt: TS() }));
+            } catch (e) { console.error("Couldn't close active match:", e); }
 
             if (recent >= FLAG_PAIR_AT) {
                 try {

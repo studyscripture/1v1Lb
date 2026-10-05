@@ -316,6 +316,9 @@
         // Keep users signed in across page loads and browser restarts
         auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).catch(console.error);
         const db = firebase.firestore();
+        // Long polling is slower to start but works on networks, VPNs and browser extensions that break
+        // Firestore's default streaming connection (the usual cause of "unavailable" errors).
+        db.settings({ experimentalForceLongPolling: true, merge: true });
 
         let currentUser = null;
         let currentGamertag = "";
@@ -420,8 +423,11 @@
                 };
                 const showProfileError = (err) => {
                     console.error("Profile load error:", err);
+                    const hint = err.code === 'unavailable'
+                        ? "Can't reach the database. Try turning off ad blockers/VPN for this site, and make sure Firestore is created in your Firebase console."
+                        : "Check your Firestore rules allow signed-in users to read/write their own users/{uid} document.";
                     document.getElementById('user-info').innerHTML =
-                        `<span style="color:#ff1744">Couldn't load your profile (${err.code || err.message}). Check your Firestore rules allow signed-in users to read/write their own users/{uid} document.</span>`;
+                        `<span style="color:#ff1744">Couldn't load your profile (${err.code || err.message}). ${hint}</span>`;
                 };
 
                 userUnsub = db.collection('users').doc(user.uid).onSnapshot(async doc => {
